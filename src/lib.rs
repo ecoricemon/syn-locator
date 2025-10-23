@@ -2583,7 +2583,7 @@ impl Locate for syn::ItemImpl {
         code: &str,
         offset: usize,
     ) -> Location {
-        if let Some((exc_token, path, for_token)) = &self.trait_ {
+        let loc = if let Some((exc_token, path, for_token)) = &self.trait_ {
             Surround {
                 front: (
                     &self.attrs,
@@ -2624,7 +2624,25 @@ impl Locate for syn::ItemImpl {
                 back: (),
             }
             .locate(locator, file_path, code, offset)
-        }
+        };
+
+        // Sets location of the `generics` manually. Because where clause is behind the `self_ty`,
+        // the location will include the `self_ty`.
+        let start = locator.get_location(&self.generics.lt_token).unwrap().start;
+        let end = locator
+            .get_location(&self.generics.where_clause)
+            .unwrap()
+            .end;
+        locator.set_location(
+            &self.generics,
+            Location {
+                file_path,
+                start,
+                end,
+            },
+        );
+
+        loc
     }
 }
 
@@ -3708,7 +3726,7 @@ impl Locate for syn::Signature {
         code: &str,
         offset: usize,
     ) -> Location {
-        Surround {
+        let loc = Surround {
             front: (
                 &self.constness,
                 &self.asyncness,
@@ -3725,7 +3743,25 @@ impl Locate for syn::Signature {
             inner: (&self.inputs, &self.variadic),
             back: (&self.output, &self.generics.where_clause),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, file_path, code, offset);
+
+        // Sets location of the `generics` manually. Because where clause is behind the `output`,
+        // the location will include the `output`.
+        let start = locator.get_location(&self.generics.lt_token).unwrap().start;
+        let end = locator
+            .get_location(&self.generics.where_clause)
+            .unwrap()
+            .end;
+        locator.set_location(
+            &self.generics,
+            Location {
+                file_path,
+                start,
+                end,
+            },
+        );
+
+        loc
     }
 }
 

@@ -183,6 +183,7 @@ fn test_where_clause() {
     let syn::Item::Impl(item_impl) = &syn.items[i] else {
         unreachable!()
     };
+    assert_eq!(item_impl.generics.code(), "<T: A> S<T> where T: B");
     assert_eq!(item_impl.generics.params.code(), "T: A");
     assert_eq!(item_impl.generics.where_clause.code(), "where T: B");
     i += 1;
@@ -191,6 +192,10 @@ fn test_where_clause() {
     let syn::Item::Impl(item_impl) = &syn.items[i] else {
         unreachable!()
     };
+    assert_eq!(
+        item_impl.generics.code(),
+        "<T: A> Trait for S<T> where T: B"
+    );
     assert_eq!(item_impl.generics.params.code(), "T: A");
     assert_eq!(item_impl.generics.where_clause.code(), "where T: B");
     i += 1;
@@ -199,6 +204,7 @@ fn test_where_clause() {
     let syn::Item::Fn(item_fn) = &syn.items[i] else {
         unreachable!()
     };
+    assert_eq!(item_fn.sig.generics.code(), "<T: A>() where T: B");
     assert_eq!(item_fn.sig.generics.params.code(), "T: A");
     assert_eq!(item_fn.sig.generics.where_clause.code(), "where T: B");
 }
