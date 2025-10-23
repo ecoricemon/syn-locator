@@ -1,0 +1,23 @@
+[package]
+name = "syn-locator"
+version = "0.1.2"
+edition = "2024"
+rust-version = "1.85"
+description = "A simple source code locator for syn crate"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+keywords = ["syn"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+find = []
+
+[dependencies]
+syn = { version = "2.0.38", features = ["full", "extra-traits"] }
+regex = { version = "1.11.1" }
+paste = { version = "1.0.14" }
+
+[dev-dependencies]
+pretty_assertions = { version = "1.4.1" }
