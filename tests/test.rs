@@ -12,7 +12,7 @@ fn test_locate() {
     test_item_macro();
     test_field_pat();
     test_field_value();
-    test_where_clause();
+    test_generics();
 }
 
 fn test_item_fn() {
@@ -161,16 +161,18 @@ fn test_field_value() {
     assert_eq!(syn.fields[i].expr.code(), "x + y");
 }
 
-fn test_where_clause() {
+fn test_generics() {
     let code = r#"
+    // `syn::Generics` without where clause
+    impl<T> S<T> {}
 
-    // ItemImpl without trait
+    // `syn::Generics` on `syn::ItemImpl` without trait
     impl<T: A> S<T> where T: B {}
 
-    // ItemImpl with trait
+    // `syn::Generics` on `syn::ItemImpl` with trait
     impl<T: A> Trait for S<T> where T: B {}
 
-    // Signature
+    // `syn::Generics` on `syn::Signature`
     fn f<T: A>() where T: B {}
     "#;
 
@@ -178,8 +180,15 @@ fn test_where_clause() {
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
 
-    // impl<T: A> S<T> where T: B {}
+    // impl<T> S<T> {}
     let mut i = 0;
+    let syn::Item::Impl(item_impl) = &syn.items[i] else {
+        unreachable!()
+    };
+    assert_eq!(item_impl.generics.code(), "<T>");
+    i += 1;
+
+    // impl<T: A> S<T> where T: B {}
     let syn::Item::Impl(item_impl) = &syn.items[i] else {
         unreachable!()
     };

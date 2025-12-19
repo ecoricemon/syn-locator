@@ -325,13 +325,16 @@ macro_rules! impl_locate_group {
                     let ( $( [<this $i>] ),* ) = self;
 
                     // Calls locate() on children.
+                    // Also, determines the end of this group.
                     let mut end = offset;
                     $(
                         let [<loc $i>] = [<this $i>].locate(locator, file_path, code, end);
-                        end = [<loc $i>].end;
+                        if [<loc $i>].start < [<loc $i>].end {
+                            end = end.max( [<loc $i>].end );
+                        }
                     )*
 
-                    // Determines start.
+                    // Determines the start of this group.
                     let mut start = usize::MAX;
                     $(
                         if [<loc $i>].start != [<loc $i>].end {
@@ -345,7 +348,7 @@ macro_rules! impl_locate_group {
                     // Relocates empty children to the closest non-empty child.
                     let mut cur = end;
                     $(
-                        if [<loc $ri>].start == [<loc $ri>].end {
+                        if [<loc $ri>].start >= [<loc $ri>].end {
                             [<this $ri>].relocate(locator, Location {
                                 file_path,
                                 start: cur,
@@ -2590,7 +2593,7 @@ impl Locate for syn::ItemImpl {
                     &self.defaultness,
                     &self.unsafety,
                     &self.impl_token,
-                    // `generics.where_clause` is behind the `self_ty`
+                    // `self.generics.where_clause` is behind the `self.self_ty`
                     &self.generics.lt_token,
                     &self.generics.params,
                     &self.generics.gt_token,
@@ -2612,7 +2615,7 @@ impl Locate for syn::ItemImpl {
                     &self.defaultness,
                     &self.unsafety,
                     &self.impl_token,
-                    // `generics.where_clause` is behind the `self_ty`
+                    // `self.generics.where_clause` is behind the `self.self_ty`
                     &self.generics.lt_token,
                     &self.generics.params,
                     &self.generics.gt_token,
@@ -2626,22 +2629,7 @@ impl Locate for syn::ItemImpl {
             .locate(locator, file_path, code, offset)
         };
 
-        // Sets location of the `generics` manually. Because where clause is behind the `self_ty`,
-        // the location will include the `self_ty`.
-        let start = locator.get_location(&self.generics.lt_token).unwrap().start;
-        let end = locator
-            .get_location(&self.generics.where_clause)
-            .unwrap()
-            .end;
-        locator.set_location(
-            &self.generics,
-            Location {
-                file_path,
-                start,
-                end,
-            },
-        );
-
+        locate_generics(locator, file_path, &self.generics);
         loc
     }
 }
@@ -3734,7 +3722,7 @@ impl Locate for syn::Signature {
                 &self.abi,
                 &self.fn_token,
                 &self.ident,
-                // `generics.where_clause` is behind the `output`
+                // `self.generics.where_clause` is behind the `self.output`
                 &self.generics.lt_token,
                 &self.generics.params,
                 &self.generics.gt_token,
@@ -3745,22 +3733,7 @@ impl Locate for syn::Signature {
         }
         .locate(locator, file_path, code, offset);
 
-        // Sets location of the `generics` manually. Because where clause is behind the `output`,
-        // the location will include the `output`.
-        let start = locator.get_location(&self.generics.lt_token).unwrap().start;
-        let end = locator
-            .get_location(&self.generics.where_clause)
-            .unwrap()
-            .end;
-        locator.set_location(
-            &self.generics,
-            Location {
-                file_path,
-                start,
-                end,
-            },
-        );
-
+        locate_generics(locator, file_path, &self.generics);
         loc
     }
 }
@@ -4497,6 +4470,45 @@ impl Locate for syn::WherePredicate {
             },
         }
     }
+}
+
+/// [`syn::WhereClause`] in [`syn::Generics`] could be somewhere outside the `syn::Generics`
+/// itself. For exmaple, `syn::WhereClause` in "impl<T> Trait for S<T> where T: Clone" is behind
+/// the self type, "S<T>". By this reason, we need to set the location of `syn::Generics` manually.
+fn locate_generics(
+    locator: &mut LocatorGuard,
+    file_path: &'static str,
+    generics: &syn::Generics
+) {
+    let start = locator.get_location(&generics.lt_token).unwrap().start;
+
+    let end = if generics.where_clause.is_some() {
+        locator.get_location(&generics.where_clause).unwrap().end
+    } else {
+        let end = locator.get_location(&generics.gt_token).unwrap().end;
+
+        // The location of `where_clause` could be different with 'gt_token' because `where_clause`
+        // could be split from other elements of the generics. But if `where_clause` is empty, it
+        // looks something weird. So, we then reset it to the location of `gt_token`.
+        let loc = Location {
+            file_path,
+            start: end,
+            end,
+        };
+        generics.where_clause.relocate(locator, loc);
+
+        end
+    };
+
+    // Sets the location of `generics`.
+    locator.set_location(
+        generics,
+        Location {
+            file_path,
+            start,
+            end,
+        },
+    );
 }
 
 // === Composite types ===
