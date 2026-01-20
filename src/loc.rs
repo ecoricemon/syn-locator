@@ -1,36 +1,39 @@
-use crate::{Result, Map};
+use crate::{Map, Result};
+use any_intern::{DroplessInterner, Interned};
 use std::{
     any::{self, Any, TypeId},
+    borrow::{Borrow, Cow},
     cell::RefCell,
     cmp,
-    pin::Pin,
-    sync::{LazyLock, OnceLock, RwLock},
-    borrow::{Borrow, Cow},
     hash::Hash,
+    pin::Pin,
     sync::Arc,
+    sync::{LazyLock, OnceLock, RwLock},
 };
-use any_intern::{DroplessInterner, Interned};
 
 /// Global [`Locator`] shared across threads.
-static SHARED_LOCATOR: LazyLock<RwLock<Locator>> = LazyLock::new(|| RwLock::new(Locator::default()));
+static SHARED_LOCATOR: LazyLock<RwLock<Locator>> =
+    LazyLock::new(|| RwLock::new(Locator::default()));
 
 thread_local! {
     /// Thread local [`Locator`].
-    static THREAD_LOCAL_LOCATOR: RefCell<Option<Locator>> = RefCell::new(None);
+    static THREAD_LOCAL_LOCATOR: RefCell<Option<Locator>> = const { RefCell::new(None) };
 }
 
 pub fn enable_thread_local(en: bool) {
-    THREAD_LOCAL_LOCATOR.with_borrow_mut(|locator| if en {
-        *locator = Some(Locator::default());
-    } else {
-        *locator = None;
+    THREAD_LOCAL_LOCATOR.with_borrow_mut(|locator| {
+        if en {
+            *locator = Some(Locator::default());
+        } else {
+            *locator = None;
+        }
     });
 }
 
 pub fn is_located<Q>(file_path: &Q) -> bool
 where
     for<'a> Interned<'a, str>: Borrow<Q>,
-    Q: Hash + Eq + ?Sized
+    Q: Hash + Eq + ?Sized,
 {
     with_locator(|locator| locator.contains_file(file_path))
 }
@@ -72,9 +75,7 @@ pub trait LocateEntry: Locate {
 
         with_locator_mut(|locator| {
             let Some(code) = locator.filtered_code_ptr(file_path) else {
-                return Err(
-                    format!("failed to find `{file_path}`").into()
-                );
+                return Err(format!("failed to find `{file_path}`").into());
             };
 
             // Safety: Locating doesn't modify code itself. Therefore, the address and its content
@@ -126,11 +127,12 @@ pub trait Locate: Any {
 
     fn location(&self) -> Location {
         with_locator(|locator| {
-            locator.get_location(self)
-                .expect(&format!(
+            locator.get_location(self).unwrap_or_else(|| {
+                panic!(
                     "failed to find the location of `{}`. did you forget `Locate::locate`?",
                     any::type_name_of_val(self)
-                ))
+                )
+            })
         })
     }
 
@@ -156,10 +158,12 @@ pub trait Locate: Any {
             let content = &code[loc.start..loc.end];
             Some(format!("{path}:{line}: {content}"))
         })
-        .expect(&format!(
-            "failed to find the location of `{}`. did you forget `Locate::locate`?",
-            any::type_name_of_val(self)
-        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to find the location of `{}`. did you forget `Locate::locate`?",
+                any::type_name_of_val(self)
+            )
+        })
     }
 
     fn code(&self) -> String {
@@ -170,10 +174,12 @@ pub trait Locate: Any {
             let content = &code[loc.start..loc.end];
             Some(content.to_owned())
         })
-        .expect(&format!(
-            "failed to find the location of `{}`. did you forget `Locate::locate`?",
-            any::type_name_of_val(self)
-        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to find the location of `{}`. did you forget `Locate::locate`?",
+                any::type_name_of_val(self)
+            )
+        })
     }
 }
 
@@ -454,7 +460,7 @@ impl Locator {
     fn contains_file<Q>(&self, file_path: &Q) -> bool
     where
         for<'a> Interned<'a, str>: Borrow<Q>,
-        Q: Hash + Eq + ?Sized
+        Q: Hash + Eq + ?Sized,
     {
         self.files.contains_key(file_path)
     }
@@ -512,8 +518,8 @@ impl Locator {
         Q: Hash + Eq + ?Sized,
     {
         self.files.get(file_path).map(|file| {
-            let code = &*file.filtered_code.as_ref();
-            code as *const _
+            let code: &str = &file.filtered_code;
+            code as *const str
         })
     }
 
@@ -525,9 +531,7 @@ impl Locator {
 
 fn intern_str(s: &str) -> Interned<'static, str> {
     /// Permanent string interner.
-    static STR_INTERNER: LazyLock<DroplessInterner> = LazyLock::new(|| {
-        DroplessInterner::new()
-    });
+    static STR_INTERNER: LazyLock<DroplessInterner> = LazyLock::new(DroplessInterner::new);
     STR_INTERNER.intern(s)
 }
 
@@ -592,7 +596,7 @@ impl LocationKey {
 }
 
 /// We intern file path in a static interner. See [`intern_str`].
-type FilePath = Interned<'static, str>;
+pub type FilePath = Interned<'static, str>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Location {
@@ -4351,11 +4355,7 @@ impl Locate for syn::WherePredicate {
 /// [`syn::WhereClause`] in [`syn::Generics`] could be somewhere outside the `syn::Generics`
 /// itself. For exmaple, `syn::WhereClause` in "impl<T> Trait for S<T> where T: Clone" is behind
 /// the self type, "S<T>". By this reason, we need to set the location of `syn::Generics` manually.
-fn locate_generics(
-    locator: &mut Locator,
-    file_path: FilePath,
-    generics: &syn::Generics
-) {
+fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::Generics) {
     let start = locator.get_location(&generics.lt_token).unwrap().start;
 
     let end = if generics.where_clause.is_some() {
@@ -4500,12 +4500,7 @@ pub mod helper {
         }
     }
 
-    pub fn str_location(
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-        content: &str,
-    ) -> Location {
+    pub fn str_location(file_path: FilePath, code: &str, offset: usize, content: &str) -> Location {
         let cur_code = &code[offset..];
 
         let start = offset
