@@ -15,11 +15,26 @@ fn test_locate() {
     test_generics();
 }
 
+#[cfg(feature = "find")]
+#[test]
+fn test_find() {
+    let code = "
+    struct A {
+        a: i32,
+    }";
+    let syn = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    let syn = Pin::new(&syn);
+    syn.locate_as_entry(&unique_name(), code).unwrap();
+
+    let field: &syn::Field = syn.find("a: i32").unwrap();
+    assert_eq!(field.code(), "a: i32");
+}
+
 fn test_item_fn() {
-    let code = r#"
+    let code = "
     pub(crate) fn foo(a: i32, b: f32) -> usize {
         12
-    }"#;
+    }";
     let syn = syn::parse_str::<syn::ItemFn>(code).unwrap();
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
@@ -35,11 +50,11 @@ fn test_item_fn() {
 }
 
 fn test_item_struct() {
-    let code = r#"
+    let code = "
     pub struct Foo<T: Bar> {
         a: T,
         b: i32,
-    }"#;
+    }";
     let syn = syn::parse_str::<syn::ItemStruct>(code).unwrap();
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
@@ -58,10 +73,10 @@ fn test_item_struct() {
 }
 
 fn test_item_macro() {
-    let code = r#"
+    let code = "
     macro_rules! foo {
         ($id:ident) => { $id() };
-    }"#;
+    }";
     let syn = syn::parse_str::<syn::ItemMacro>(code).unwrap();
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
@@ -78,16 +93,16 @@ fn test_item_macro() {
 }
 
 fn test_field_pat() {
-    let code = r#"
-    let X { 
-        a, 
-        ref b, 
+    let code = "
+    let X {
+        a,
+        ref b,
         ref mut c,
         d: dd,
         e: ref ee,
         f: ref mut ff,
     } = x;
-    "#;
+    ";
     let syn = syn::parse_str::<syn::Stmt>(code).unwrap();
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
@@ -134,13 +149,13 @@ fn test_field_pat() {
 }
 
 fn test_field_value() {
-    let code = r#"
-    T { 
-        a, 
+    let code = "
+    T {
+        a,
         b: b,
         c: x + y,
     }
-    "#;
+    ";
     let syn = syn::parse_str::<syn::ExprStruct>(code).unwrap();
     let syn = Pin::new(&syn);
     syn.locate_as_entry(&unique_name(), code).unwrap();
@@ -162,7 +177,7 @@ fn test_field_value() {
 }
 
 fn test_generics() {
-    let code = r#"
+    let code = "
     // `syn::Generics` without where clause
     impl<T> S<T> {}
 
@@ -174,7 +189,7 @@ fn test_generics() {
 
     // `syn::Generics` on `syn::Signature`
     fn f<T: A>() where T: B {}
-    "#;
+    ";
 
     let syn = syn::parse_str::<syn::File>(code).unwrap();
     let syn = Pin::new(&syn);

@@ -36,9 +36,9 @@ let field_ty = &item_struct.fields.iter().next().unwrap().ty;
 
 // Let's find out 'i32' from the syntax tree node.
 assert_eq!(field_ty.location_message(), "/path/to/file.rs:3: i32");
-assert_eq!(field_ty.location(), Location {
-    file_path,
+assert!(matches!(field_ty.location(), Location {
     start: 29, // Byte offset
-    end: 32
-});
+    end: 32,
+    ..
+}));
 ```

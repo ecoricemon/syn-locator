@@ -1,8 +1,8 @@
 [package]
 name = "syn-locator"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "A simple source code locator for syn crate"
 repository = "https://github.com/ecoricemon/syn-locator"
 license = "Apache-2.0 OR MIT"
@@ -15,9 +15,11 @@ crate-type = ["cdylib", "rlib"]
 find = []
 
 [dependencies]
-syn = { version = "2.0.38", features = ["full", "extra-traits"] }
+any-intern = { git = "https://github.com/ecoricemon/logic-eval.git", rev = "616b273600f2d9d801b9d9e8818b68f9fb4a6710" }
+syn = { version = "2.0.38", features = ["full"] }
 regex = { version = "1.11.1" }
 paste = { version = "1.0.14" }
+fxhash = { version = "0.2.1" }
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.1" }
