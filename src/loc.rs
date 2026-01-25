@@ -4,7 +4,6 @@ use std::{
     any::{self, Any, TypeId},
     borrow::{Borrow, Cow},
     cell::RefCell,
-    cmp,
     hash::Hash,
     pin::Pin,
     sync::Arc,
@@ -529,6 +528,7 @@ impl Locator {
     }
 }
 
+/// Interns a string in a global and permanent interner.
 fn intern_str(s: &str) -> Interned<'static, str> {
     /// Permanent string interner.
     static STR_INTERNER: LazyLock<DroplessInterner> = LazyLock::new(DroplessInterner::new);
@@ -598,7 +598,7 @@ impl LocationKey {
 /// We intern file path in a static interner. See [`intern_str`].
 pub type FilePath = Interned<'static, str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Location {
     pub file_path: FilePath,
 
@@ -607,24 +607,6 @@ pub struct Location {
 
     /// Byte index to the code. Exclusive
     pub end: usize,
-}
-
-impl PartialOrd for Location {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Location {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        match self.file_path.cmp(*other.file_path) {
-            cmp::Ordering::Equal => match self.start.cmp(&other.start) {
-                cmp::Ordering::Equal => self.end.cmp(&other.end),
-                o => o,
-            },
-            o => o,
-        }
-    }
 }
 
 macro_rules! impl_locate_for_token {

@@ -9,13 +9,13 @@ license = "Apache-2.0 OR MIT"
 keywords = ["syn"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 find = []
 
 [dependencies]
-any-intern = { git = "https://github.com/ecoricemon/logic-eval.git", rev = "616b273600f2d9d801b9d9e8818b68f9fb4a6710" }
+any-intern = { version = "0.1.1" }
 syn = { version = "2.0.38", features = ["full"] }
 regex = { version = "1.11.1" }
 paste = { version = "1.0.14" }
