@@ -10,8 +10,8 @@ pub use any_intern::Interned;
 #[cfg(feature = "find")]
 pub use find::{Find, FindPtr};
 pub use loc::{
-    FilePath, Locate, LocateEntry, LocateGroup, Location, Locator, clear, enable_thread_local,
-    is_located,
+    clear, enable_thread_local, is_located, FilePath, Locate, LocateEntry, LocateGroup, Location,
+    Locator,
 };
 
 // === Result/Error used within this crate ===

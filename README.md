@@ -1,5 +1,16 @@
 # syn-locator
 
+[![Crates.io][crates-badge]][crates-url]
+[![CI Status][ci-badge]][ci-url]
+[![Codecov][codecov-badge]][codecov-url]
+
+[crates-badge]: https://img.shields.io/crates/v/syn-locator.svg
+[crates-url]: https://crates.io/crates/syn-locator
+[ci-badge]: https://github.com/ecoricemon/syn-locator/actions/workflows/test.yml/badge.svg
+[ci-url]: https://github.com/ecoricemon/syn-locator/actions/workflows/test.yml
+[codecov-badge]: https://codecov.io/gh/ecoricemon/syn-locator/graph/badge.svg
+[codecov-url]: https://app.codecov.io/gh/ecoricemon/syn-locator
+
 syn-locator helps you to find source code locations of
 [syn](https://crates.io/crates/syn) nodes.
 
@@ -25,7 +36,7 @@ let syn = syn::parse_str::<syn::File>(code).unwrap();
 
 // Finds location of the syntax tree.
 let syn = std::pin::Pin::new(&syn);
-syn.locate_as_entry(file_path, code);
+syn.locate_as_entry(file_path, code).unwrap();
 
 // Picks a syntax tree node.
 let item_struct = match &syn.items[0] {

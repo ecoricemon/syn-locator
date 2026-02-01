@@ -5,6 +5,12 @@ use std::{
 };
 use syn_locator::*;
 
+fn unique_name() -> String {
+    static NUM: AtomicU32 = AtomicU32::new(0);
+    let num = NUM.fetch_add(1, Ordering::Relaxed);
+    num.to_string()
+}
+
 #[test]
 fn test_locate() {
     test_item_fn();
@@ -13,21 +19,6 @@ fn test_locate() {
     test_field_pat();
     test_field_value();
     test_generics();
-}
-
-#[cfg(feature = "find")]
-#[test]
-fn test_find() {
-    let code = "
-    struct A {
-        a: i32,
-    }";
-    let syn = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    let syn = Pin::new(&syn);
-    syn.locate_as_entry(&unique_name(), code).unwrap();
-
-    let field: &syn::Field = syn.find("a: i32").unwrap();
-    assert_eq!(field.code(), "a: i32");
 }
 
 fn test_item_fn() {
@@ -233,8 +224,17 @@ fn test_generics() {
     assert_eq!(item_fn.sig.generics.where_clause.code(), "where T: B");
 }
 
-fn unique_name() -> String {
-    static NUM: AtomicU32 = AtomicU32::new(0);
-    let num = NUM.fetch_add(1, Ordering::Relaxed);
-    num.to_string()
+#[cfg(feature = "find")]
+#[test]
+fn test_find() {
+    let code = "
+    struct A {
+        a: i32,
+    }";
+    let syn = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    let syn = Pin::new(&syn);
+    syn.locate_as_entry(&unique_name(), code).unwrap();
+
+    let field: &syn::Field = syn.find("a: i32").unwrap();
+    assert_eq!(field.code(), "a: i32");
 }
