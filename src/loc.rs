@@ -1,5 +1,6 @@
 use crate::{Map, Result};
 use any_intern::{DroplessInterner, Interned};
+use once_cell::sync::{Lazy, OnceCell};
 use std::{
     any::{self, Any, TypeId},
     borrow::{Borrow, Cow},
@@ -7,12 +8,11 @@ use std::{
     hash::Hash,
     pin::Pin,
     sync::Arc,
-    sync::{LazyLock, OnceLock, RwLock},
+    sync::RwLock,
 };
 
 /// Global [`Locator`] shared across threads.
-static SHARED_LOCATOR: LazyLock<RwLock<Locator>> =
-    LazyLock::new(|| RwLock::new(Locator::default()));
+static SHARED_LOCATOR: Lazy<RwLock<Locator>> = Lazy::new(|| RwLock::new(Locator::default()));
 
 thread_local! {
     /// Thread local [`Locator`].
@@ -20,7 +20,8 @@ thread_local! {
 }
 
 pub fn enable_thread_local(en: bool) {
-    THREAD_LOCAL_LOCATOR.with_borrow_mut(|locator| {
+    THREAD_LOCAL_LOCATOR.with(|locator| {
+        let mut locator = locator.borrow_mut();
         if en {
             *locator = Some(Locator::default());
         } else {
@@ -45,8 +46,9 @@ pub fn clear() {
 /// Thread-local locator is preferred if exists, otherwise shared locator will be chosen as a
 /// fallback.
 fn with_locator_mut<F: FnOnce(&mut Locator) -> R, R>(f: F) -> R {
-    THREAD_LOCAL_LOCATOR.with_borrow_mut(|locator| {
-        if let Some(locator) = locator {
+    THREAD_LOCAL_LOCATOR.with(|locator| {
+        let mut locator = locator.borrow_mut();
+        if let Some(locator) = &mut *locator {
             f(locator)
         } else {
             let mut locator = SHARED_LOCATOR.write().unwrap();
@@ -58,8 +60,9 @@ fn with_locator_mut<F: FnOnce(&mut Locator) -> R, R>(f: F) -> R {
 /// Thread-local locator is preferred if exists, otherwise shared locator will be chosen as a
 /// fallback.
 fn with_locator<F: FnOnce(&Locator) -> R, R>(f: F) -> R {
-    THREAD_LOCAL_LOCATOR.with_borrow(|locator| {
-        if let Some(locator) = locator {
+    THREAD_LOCAL_LOCATOR.with(|locator| {
+        let locator = locator.borrow();
+        if let Some(locator) = &*locator {
             f(locator)
         } else {
             let mut locator = SHARED_LOCATOR.read().unwrap();
@@ -129,7 +132,7 @@ pub trait Locate: Any {
             locator.get_location(self).unwrap_or_else(|| {
                 panic!(
                     "failed to find the location of `{}`. did you forget `Locate::locate`?",
-                    any::type_name_of_val(self)
+                    any::type_name::<Self>()
                 )
             })
         })
@@ -139,7 +142,7 @@ pub trait Locate: Any {
         locator.get_location(self).unwrap_or_else(|| {
             panic!(
                 "failed to find the location of `{}`. did you forget `Locate::locate`?",
-                any::type_name_of_val(self)
+                any::type_name::<Self>()
             )
         })
     }
@@ -160,7 +163,7 @@ pub trait Locate: Any {
         .unwrap_or_else(|| {
             panic!(
                 "failed to find the location of `{}`. did you forget `Locate::locate`?",
-                any::type_name_of_val(self)
+                any::type_name::<Self>()
             )
         })
     }
@@ -176,7 +179,7 @@ pub trait Locate: Any {
         .unwrap_or_else(|| {
             panic!(
                 "failed to find the location of `{}`. did you forget `Locate::locate`?",
-                any::type_name_of_val(self)
+                any::type_name::<Self>()
             )
         })
     }
@@ -531,7 +534,7 @@ impl Locator {
 /// Interns a string in a global and permanent interner.
 fn intern_str(s: &str) -> Interned<'static, str> {
     /// Permanent string interner.
-    static STR_INTERNER: LazyLock<DroplessInterner> = LazyLock::new(DroplessInterner::new);
+    static STR_INTERNER: Lazy<DroplessInterner> = Lazy::new(DroplessInterner::new);
     STR_INTERNER.intern(s)
 }
 
@@ -556,7 +559,7 @@ impl Content {
     fn remove_non_tokens(code: &str) -> Cow<'_, str> {
         use regex::{Captures, Regex};
 
-        static RE: OnceLock<Regex> = OnceLock::new();
+        static RE: OnceCell<Regex> = OnceCell::new();
 
         // Regex doesn't support recursion, so that we cannot remove nested
         // comments. We need to write code from scratch to do that.
