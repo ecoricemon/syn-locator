@@ -77,7 +77,7 @@ pub trait LocateEntry: Locate {
 
         with_locator_mut(|locator| {
             let Some(code) = locator.filtered_code_ptr(file_path) else {
-                return Err(format!("failed to find `{file_path}`").into());
+                return Err(format!("failed to find the file `{file_path}`").into());
             };
 
             // Safety: Locating doesn't modify code itself. Therefore, the address and its content
