@@ -58,7 +58,7 @@ where
     A: syn::parse::Parse + FindPtr + Locate,
     D: Locate,
 {
-    test(&ancestor_code, |ancestor: &A| {
+    test(ancestor_code, |ancestor: &A| {
         let found: &D = ancestor.find(descendant_code).unwrap();
         assert_eq!(found.code(), descendant_code);
     })
