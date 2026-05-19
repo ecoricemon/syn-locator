@@ -1,8 +1,8 @@
-use super::Locate;
+use super::{Locate, Located, Locator};
 use std::any::{Any, TypeId};
 
 pub trait Find<Output: Any> {
-    fn find(&self, code: &str) -> Option<&Output>;
+    fn find(&self, locator: &Locator, code: &str) -> Option<&Output>;
 }
 
 impl<O, T> Find<O> for T
@@ -10,37 +10,45 @@ where
     O: Any,
     T: FindPtr,
 {
-    fn find(&self, code: &str) -> Option<&O> {
-        self.find_ptr(TypeId::of::<O>(), code)
+    fn find(&self, locator: &Locator, code: &str) -> Option<&O> {
+        self.find_ptr(locator, TypeId::of::<O>(), code)
             .map(|ptr| unsafe { (ptr as *const O).as_ref().unwrap() })
     }
 }
 
+impl<T: FindPtr + Locate> Located<T> {
+    pub fn find<O: Any>(&self, code: &str) -> Option<&O> {
+        self.syntax().find(self.locator(), code)
+    }
+}
+
 pub trait FindPtr {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()>;
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()>;
 }
 
 impl<T: FindPtr> FindPtr for Option<T> {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        self.as_ref()?.find_ptr(target, code)
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        self.as_ref()?.find_ptr(locator, target, code)
     }
 }
 
 impl<T: FindPtr> FindPtr for Box<T> {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        self.as_ref().find_ptr(target, code)
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        self.as_ref().find_ptr(locator, target, code)
     }
 }
 
 impl<T: FindPtr> FindPtr for Vec<T> {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        self.iter().find_map(|elem| elem.find_ptr(target, code))
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        self.iter()
+            .find_map(|elem| elem.find_ptr(locator, target, code))
     }
 }
 
 impl<T: FindPtr, P> FindPtr for syn::punctuated::Punctuated<T, P> {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        self.iter().find_map(|elem| elem.find_ptr(target, code))
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        self.iter()
+            .find_map(|elem| elem.find_ptr(locator, target, code))
     }
 }
 
@@ -49,10 +57,10 @@ where
     T0: FindPtr,
     T1: FindPtr,
 {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
         self.0
-            .find_ptr(target, code)
-            .or_else(|| self.1.find_ptr(target, code))
+            .find_ptr(locator, target, code)
+            .or_else(|| self.1.find_ptr(locator, target, code))
     }
 }
 
@@ -62,17 +70,17 @@ where
     T1: FindPtr,
     T2: FindPtr,
 {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
         self.0
-            .find_ptr(target, code)
-            .or_else(|| self.1.find_ptr(target, code))
-            .or_else(|| self.2.find_ptr(target, code))
+            .find_ptr(locator, target, code)
+            .or_else(|| self.1.find_ptr(locator, target, code))
+            .or_else(|| self.2.find_ptr(locator, target, code))
     }
 }
 
 macro_rules! compare_then_return_if_target {
-    ($self:expr, $target:expr, $code:expr) => {
-        if $self.type_id() == $target && $self.code() == $code {
+    ($self:expr, $locator:expr, $target:expr, $code:expr) => {
+        if $self.type_id() == $target && $self.code($locator) == $code {
             return Some($self as *const _ as *const ());
         }
     };
@@ -81,8 +89,8 @@ macro_rules! compare_then_return_if_target {
 macro_rules! impl_find_ptr_for_token {
     ($ty:ty) => {
         impl FindPtr for $ty {
-            fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-                compare_then_return_if_target!(self, target, code);
+            fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+                compare_then_return_if_target!(self, locator, target, code);
                 None
             }
         }
@@ -197,27 +205,27 @@ impl_find_ptr_for_token!(syn::token::Paren);
 macro_rules! impl_find_ptr_simple {
     ($ty:ty) => {
         impl FindPtr for $ty {
-            fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-                compare_then_return_if_target!(self, target, code);
+            fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+                compare_then_return_if_target!(self, locator, target, code);
                 None
             }
         }
     };
     ($ty:ty, $first:ident) => {
         impl FindPtr for $ty {
-            fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-                compare_then_return_if_target!(self, target, code);
-                self.$first.find_ptr(target, code)
+            fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+                compare_then_return_if_target!(self, locator, target, code);
+                self.$first.find_ptr(locator, target, code)
             }
         }
     };
     ($ty:ty, $first:ident, $($rest:ident),+) => {
         impl FindPtr for $ty {
-            fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-                compare_then_return_if_target!(self, target, code);
-                self.$first.find_ptr(target, code)
+            fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+                compare_then_return_if_target!(self, locator, target, code);
+                self.$first.find_ptr(locator, target, code)
                 $(
-                    .or_else(|| self.$rest.find_ptr(target, code))
+                    .or_else(|| self.$rest.find_ptr(locator, target, code))
                 )*
             }
         }
@@ -237,48 +245,48 @@ impl_find_ptr_simple!(syn::AssocConst, ident, generics, eq_token, value);
 impl_find_ptr_simple!(syn::AssocType, ident, generics, eq_token, ty);
 impl_find_ptr_simple!(syn::Attribute, pound_token, style, bracket_token, meta);
 impl FindPtr for syn::AttrStyle {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
             Self::Outer => None,
-            Self::Inner(v) => v.find_ptr(target, code),
+            Self::Inner(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl_find_ptr_simple!(syn::BareFnArg, attrs, name, ty);
 impl_find_ptr_simple!(syn::BareVariadic, attrs, name, dots, comma);
 impl FindPtr for syn::BinOp {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Add(v) => v.find_ptr(target, code),
-            Self::Sub(v) => v.find_ptr(target, code),
-            Self::Mul(v) => v.find_ptr(target, code),
-            Self::Div(v) => v.find_ptr(target, code),
-            Self::Rem(v) => v.find_ptr(target, code),
-            Self::And(v) => v.find_ptr(target, code),
-            Self::Or(v) => v.find_ptr(target, code),
-            Self::BitXor(v) => v.find_ptr(target, code),
-            Self::BitAnd(v) => v.find_ptr(target, code),
-            Self::BitOr(v) => v.find_ptr(target, code),
-            Self::Shl(v) => v.find_ptr(target, code),
-            Self::Shr(v) => v.find_ptr(target, code),
-            Self::Eq(v) => v.find_ptr(target, code),
-            Self::Lt(v) => v.find_ptr(target, code),
-            Self::Le(v) => v.find_ptr(target, code),
-            Self::Ne(v) => v.find_ptr(target, code),
-            Self::Ge(v) => v.find_ptr(target, code),
-            Self::Gt(v) => v.find_ptr(target, code),
-            Self::AddAssign(v) => v.find_ptr(target, code),
-            Self::SubAssign(v) => v.find_ptr(target, code),
-            Self::MulAssign(v) => v.find_ptr(target, code),
-            Self::DivAssign(v) => v.find_ptr(target, code),
-            Self::RemAssign(v) => v.find_ptr(target, code),
-            Self::BitXorAssign(v) => v.find_ptr(target, code),
-            Self::BitAndAssign(v) => v.find_ptr(target, code),
-            Self::BitOrAssign(v) => v.find_ptr(target, code),
-            Self::ShlAssign(v) => v.find_ptr(target, code),
-            Self::ShrAssign(v) => v.find_ptr(target, code),
+            Self::Add(v) => v.find_ptr(locator, target, code),
+            Self::Sub(v) => v.find_ptr(locator, target, code),
+            Self::Mul(v) => v.find_ptr(locator, target, code),
+            Self::Div(v) => v.find_ptr(locator, target, code),
+            Self::Rem(v) => v.find_ptr(locator, target, code),
+            Self::And(v) => v.find_ptr(locator, target, code),
+            Self::Or(v) => v.find_ptr(locator, target, code),
+            Self::BitXor(v) => v.find_ptr(locator, target, code),
+            Self::BitAnd(v) => v.find_ptr(locator, target, code),
+            Self::BitOr(v) => v.find_ptr(locator, target, code),
+            Self::Shl(v) => v.find_ptr(locator, target, code),
+            Self::Shr(v) => v.find_ptr(locator, target, code),
+            Self::Eq(v) => v.find_ptr(locator, target, code),
+            Self::Lt(v) => v.find_ptr(locator, target, code),
+            Self::Le(v) => v.find_ptr(locator, target, code),
+            Self::Ne(v) => v.find_ptr(locator, target, code),
+            Self::Ge(v) => v.find_ptr(locator, target, code),
+            Self::Gt(v) => v.find_ptr(locator, target, code),
+            Self::AddAssign(v) => v.find_ptr(locator, target, code),
+            Self::SubAssign(v) => v.find_ptr(locator, target, code),
+            Self::MulAssign(v) => v.find_ptr(locator, target, code),
+            Self::DivAssign(v) => v.find_ptr(locator, target, code),
+            Self::RemAssign(v) => v.find_ptr(locator, target, code),
+            Self::BitXorAssign(v) => v.find_ptr(locator, target, code),
+            Self::BitAndAssign(v) => v.find_ptr(locator, target, code),
+            Self::BitOrAssign(v) => v.find_ptr(locator, target, code),
+            Self::ShlAssign(v) => v.find_ptr(locator, target, code),
+            Self::ShrAssign(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
@@ -292,11 +300,11 @@ impl_find_ptr_simple!(
     gt_token
 );
 impl FindPtr for syn::CapturedParam {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Lifetime(v) => v.find_ptr(target, code),
-            Self::Ident(v) => v.find_ptr(target, code),
+            Self::Lifetime(v) => v.find_ptr(locator, target, code),
+            Self::Ident(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
@@ -313,49 +321,49 @@ impl_find_ptr_simple!(
 );
 impl_find_ptr_simple!(syn::Constraint, ident, generics, colon_token, bounds);
 impl FindPtr for syn::Expr {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Array(v) => v.find_ptr(target, code),
-            Self::Assign(v) => v.find_ptr(target, code),
-            Self::Async(v) => v.find_ptr(target, code),
-            Self::Await(v) => v.find_ptr(target, code),
-            Self::Binary(v) => v.find_ptr(target, code),
-            Self::Block(v) => v.find_ptr(target, code),
-            Self::Break(v) => v.find_ptr(target, code),
-            Self::Call(v) => v.find_ptr(target, code),
-            Self::Cast(v) => v.find_ptr(target, code),
-            Self::Closure(v) => v.find_ptr(target, code),
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Continue(v) => v.find_ptr(target, code),
-            Self::Field(v) => v.find_ptr(target, code),
-            Self::ForLoop(v) => v.find_ptr(target, code),
-            Self::Group(v) => v.find_ptr(target, code),
-            Self::If(v) => v.find_ptr(target, code),
-            Self::Index(v) => v.find_ptr(target, code),
-            Self::Infer(v) => v.find_ptr(target, code),
-            Self::Let(v) => v.find_ptr(target, code),
-            Self::Lit(v) => v.find_ptr(target, code),
-            Self::Loop(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
-            Self::Match(v) => v.find_ptr(target, code),
-            Self::MethodCall(v) => v.find_ptr(target, code),
-            Self::Paren(v) => v.find_ptr(target, code),
-            Self::Path(v) => v.find_ptr(target, code),
-            Self::Range(v) => v.find_ptr(target, code),
-            Self::RawAddr(v) => v.find_ptr(target, code),
-            Self::Reference(v) => v.find_ptr(target, code),
-            Self::Repeat(v) => v.find_ptr(target, code),
-            Self::Return(v) => v.find_ptr(target, code),
-            Self::Struct(v) => v.find_ptr(target, code),
-            Self::Try(v) => v.find_ptr(target, code),
-            Self::TryBlock(v) => v.find_ptr(target, code),
-            Self::Tuple(v) => v.find_ptr(target, code),
-            Self::Unary(v) => v.find_ptr(target, code),
-            Self::Unsafe(v) => v.find_ptr(target, code),
+            Self::Array(v) => v.find_ptr(locator, target, code),
+            Self::Assign(v) => v.find_ptr(locator, target, code),
+            Self::Async(v) => v.find_ptr(locator, target, code),
+            Self::Await(v) => v.find_ptr(locator, target, code),
+            Self::Binary(v) => v.find_ptr(locator, target, code),
+            Self::Block(v) => v.find_ptr(locator, target, code),
+            Self::Break(v) => v.find_ptr(locator, target, code),
+            Self::Call(v) => v.find_ptr(locator, target, code),
+            Self::Cast(v) => v.find_ptr(locator, target, code),
+            Self::Closure(v) => v.find_ptr(locator, target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Continue(v) => v.find_ptr(locator, target, code),
+            Self::Field(v) => v.find_ptr(locator, target, code),
+            Self::ForLoop(v) => v.find_ptr(locator, target, code),
+            Self::Group(v) => v.find_ptr(locator, target, code),
+            Self::If(v) => v.find_ptr(locator, target, code),
+            Self::Index(v) => v.find_ptr(locator, target, code),
+            Self::Infer(v) => v.find_ptr(locator, target, code),
+            Self::Let(v) => v.find_ptr(locator, target, code),
+            Self::Lit(v) => v.find_ptr(locator, target, code),
+            Self::Loop(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
+            Self::Match(v) => v.find_ptr(locator, target, code),
+            Self::MethodCall(v) => v.find_ptr(locator, target, code),
+            Self::Paren(v) => v.find_ptr(locator, target, code),
+            Self::Path(v) => v.find_ptr(locator, target, code),
+            Self::Range(v) => v.find_ptr(locator, target, code),
+            Self::RawAddr(v) => v.find_ptr(locator, target, code),
+            Self::Reference(v) => v.find_ptr(locator, target, code),
+            Self::Repeat(v) => v.find_ptr(locator, target, code),
+            Self::Return(v) => v.find_ptr(locator, target, code),
+            Self::Struct(v) => v.find_ptr(locator, target, code),
+            Self::Try(v) => v.find_ptr(locator, target, code),
+            Self::TryBlock(v) => v.find_ptr(locator, target, code),
+            Self::Tuple(v) => v.find_ptr(locator, target, code),
+            Self::Unary(v) => v.find_ptr(locator, target, code),
+            Self::Unsafe(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
-            Self::While(v) => v.find_ptr(target, code),
-            Self::Yield(v) => v.find_ptr(target, code),
+            Self::While(v) => v.find_ptr(locator, target, code),
+            Self::Yield(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
@@ -441,18 +449,18 @@ impl_find_ptr_simple!(syn::ExprWhile, attrs, label, while_token, cond, body);
 impl_find_ptr_simple!(syn::ExprYield, attrs, yield_token, expr);
 impl_find_ptr_simple!(syn::Field, attrs, vis, mutability, ident, colon_token, ty);
 impl FindPtr for syn::FieldMutability {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         None
     }
 }
 impl_find_ptr_simple!(syn::FieldPat, attrs, member, colon_token, pat);
 impl FindPtr for syn::Fields {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Named(v) => v.find_ptr(target, code),
-            Self::Unnamed(v) => v.find_ptr(target, code),
+            Self::Named(v) => v.find_ptr(locator, target, code),
+            Self::Unnamed(v) => v.find_ptr(locator, target, code),
             Self::Unit => None,
         }
     }
@@ -462,22 +470,22 @@ impl_find_ptr_simple!(syn::FieldsUnnamed, paren_token, unnamed);
 impl_find_ptr_simple!(syn::FieldValue, attrs, member, colon_token, expr);
 impl_find_ptr_simple!(syn::File, /*shebang*/ attrs, items);
 impl FindPtr for syn::FnArg {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Receiver(v) => v.find_ptr(target, code),
-            Self::Typed(v) => v.find_ptr(target, code),
+            Self::Receiver(v) => v.find_ptr(locator, target, code),
+            Self::Typed(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl FindPtr for syn::ForeignItem {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Fn(v) => v.find_ptr(target, code),
-            Self::Static(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
+            Self::Fn(v) => v.find_ptr(locator, target, code),
+            Self::Static(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -506,39 +514,39 @@ impl_find_ptr_simple!(
 );
 impl_find_ptr_simple!(syn::ForeignItemMacro, attrs, mac, semi_token);
 impl FindPtr for syn::GenericArgument {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Lifetime(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::AssocType(v) => v.find_ptr(target, code),
-            Self::AssocConst(v) => v.find_ptr(target, code),
-            Self::Constraint(v) => v.find_ptr(target, code),
+            Self::Lifetime(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::AssocType(v) => v.find_ptr(locator, target, code),
+            Self::AssocConst(v) => v.find_ptr(locator, target, code),
+            Self::Constraint(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
 }
 impl FindPtr for syn::GenericParam {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Lifetime(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Const(v) => v.find_ptr(target, code),
+            Self::Lifetime(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl_find_ptr_simple!(syn::Generics, lt_token, params, gt_token, where_clause);
 impl_find_ptr_simple!(syn::Ident);
 impl FindPtr for syn::ImplItem {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Fn(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Fn(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -573,8 +581,8 @@ impl_find_ptr_simple!(
 );
 impl_find_ptr_simple!(syn::ImplItemMacro, attrs, mac, semi_token);
 impl FindPtr for syn::ImplRestriction {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         #[allow(clippy::match_single_binding)]
         match self {
             _ => None,
@@ -583,24 +591,24 @@ impl FindPtr for syn::ImplRestriction {
 }
 impl_find_ptr_simple!(syn::Index);
 impl FindPtr for syn::Item {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Enum(v) => v.find_ptr(target, code),
-            Self::ExternCrate(v) => v.find_ptr(target, code),
-            Self::Fn(v) => v.find_ptr(target, code),
-            Self::ForeignMod(v) => v.find_ptr(target, code),
-            Self::Impl(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
-            Self::Mod(v) => v.find_ptr(target, code),
-            Self::Static(v) => v.find_ptr(target, code),
-            Self::Struct(v) => v.find_ptr(target, code),
-            Self::Trait(v) => v.find_ptr(target, code),
-            Self::TraitAlias(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Union(v) => v.find_ptr(target, code),
-            Self::Use(v) => v.find_ptr(target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Enum(v) => v.find_ptr(locator, target, code),
+            Self::ExternCrate(v) => v.find_ptr(locator, target, code),
+            Self::Fn(v) => v.find_ptr(locator, target, code),
+            Self::ForeignMod(v) => v.find_ptr(locator, target, code),
+            Self::Impl(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
+            Self::Mod(v) => v.find_ptr(locator, target, code),
+            Self::Static(v) => v.find_ptr(locator, target, code),
+            Self::Struct(v) => v.find_ptr(locator, target, code),
+            Self::Trait(v) => v.find_ptr(locator, target, code),
+            Self::TraitAlias(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Union(v) => v.find_ptr(locator, target, code),
+            Self::Use(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -664,14 +672,14 @@ impl_find_ptr_simple!(
 // syn parses these fields in a different order from their struct declaration.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/item.rs#L1240
 impl FindPtr for syn::ItemMacro {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         self.attrs
-            .find_ptr(target, code)
-            .or_else(|| self.mac.path.find_ptr(target, code))
-            .or_else(|| self.mac.bang_token.find_ptr(target, code))
-            .or_else(|| self.ident.find_ptr(target, code))
-            .or_else(|| self.semi_token.find_ptr(target, code))
+            .find_ptr(locator, target, code)
+            .or_else(|| self.mac.path.find_ptr(locator, target, code))
+            .or_else(|| self.mac.bang_token.find_ptr(locator, target, code))
+            .or_else(|| self.ident.find_ptr(locator, target, code))
+            .or_else(|| self.semi_token.find_ptr(locator, target, code))
     }
 }
 impl_find_ptr_simple!(
@@ -766,17 +774,17 @@ impl_find_ptr_simple!(syn::Label, name, colon_token);
 impl_find_ptr_simple!(syn::Lifetime, ident);
 impl_find_ptr_simple!(syn::LifetimeParam, attrs, lifetime, colon_token, bounds);
 impl FindPtr for syn::Lit {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Str(v) => v.find_ptr(target, code),
-            Self::ByteStr(v) => v.find_ptr(target, code),
-            Self::CStr(v) => v.find_ptr(target, code),
-            Self::Byte(v) => v.find_ptr(target, code),
-            Self::Char(v) => v.find_ptr(target, code),
-            Self::Int(v) => v.find_ptr(target, code),
-            Self::Float(v) => v.find_ptr(target, code),
-            Self::Bool(v) => v.find_ptr(target, code),
+            Self::Str(v) => v.find_ptr(locator, target, code),
+            Self::ByteStr(v) => v.find_ptr(locator, target, code),
+            Self::CStr(v) => v.find_ptr(locator, target, code),
+            Self::Byte(v) => v.find_ptr(locator, target, code),
+            Self::Char(v) => v.find_ptr(locator, target, code),
+            Self::Int(v) => v.find_ptr(locator, target, code),
+            Self::Float(v) => v.find_ptr(locator, target, code),
+            Self::Bool(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -794,31 +802,31 @@ impl_find_ptr_simple!(syn::Local, attrs, let_token, pat, init, semi_token);
 impl_find_ptr_simple!(syn::LocalInit, eq_token, expr, diverge);
 impl_find_ptr_simple!(syn::Macro, path, bang_token, delimiter /*tokens*/);
 impl FindPtr for syn::MacroDelimiter {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Paren(v) => v.find_ptr(target, code),
-            Self::Brace(v) => v.find_ptr(target, code),
-            Self::Bracket(v) => v.find_ptr(target, code),
+            Self::Paren(v) => v.find_ptr(locator, target, code),
+            Self::Brace(v) => v.find_ptr(locator, target, code),
+            Self::Bracket(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl FindPtr for syn::Member {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Named(v) => v.find_ptr(target, code),
-            Self::Unnamed(v) => v.find_ptr(target, code),
+            Self::Named(v) => v.find_ptr(locator, target, code),
+            Self::Unnamed(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl FindPtr for syn::Meta {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Path(v) => v.find_ptr(target, code),
-            Self::List(v) => v.find_ptr(target, code),
-            Self::NameValue(v) => v.find_ptr(target, code),
+            Self::Path(v) => v.find_ptr(locator, target, code),
+            Self::List(v) => v.find_ptr(locator, target, code),
+            Self::NameValue(v) => v.find_ptr(locator, target, code),
         }
     }
 }
@@ -831,26 +839,26 @@ impl_find_ptr_simple!(
     output
 );
 impl FindPtr for syn::Pat {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Ident(v) => v.find_ptr(target, code),
-            Self::Lit(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
-            Self::Or(v) => v.find_ptr(target, code),
-            Self::Paren(v) => v.find_ptr(target, code),
-            Self::Path(v) => v.find_ptr(target, code),
-            Self::Range(v) => v.find_ptr(target, code),
-            Self::Reference(v) => v.find_ptr(target, code),
-            Self::Rest(v) => v.find_ptr(target, code),
-            Self::Slice(v) => v.find_ptr(target, code),
-            Self::Struct(v) => v.find_ptr(target, code),
-            Self::Tuple(v) => v.find_ptr(target, code),
-            Self::TupleStruct(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Ident(v) => v.find_ptr(locator, target, code),
+            Self::Lit(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
+            Self::Or(v) => v.find_ptr(locator, target, code),
+            Self::Paren(v) => v.find_ptr(locator, target, code),
+            Self::Path(v) => v.find_ptr(locator, target, code),
+            Self::Range(v) => v.find_ptr(locator, target, code),
+            Self::Reference(v) => v.find_ptr(locator, target, code),
+            Self::Rest(v) => v.find_ptr(locator, target, code),
+            Self::Slice(v) => v.find_ptr(locator, target, code),
+            Self::Struct(v) => v.find_ptr(locator, target, code),
+            Self::Tuple(v) => v.find_ptr(locator, target, code),
+            Self::TupleStruct(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
-            Self::Wild(v) => v.find_ptr(target, code),
+            Self::Wild(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
@@ -876,22 +884,22 @@ impl_find_ptr_simple!(syn::PatType, attrs, pat, colon_token, ty);
 impl_find_ptr_simple!(syn::PatWild, attrs, underscore_token);
 impl_find_ptr_simple!(syn::Path, leading_colon, segments);
 impl FindPtr for syn::PathArguments {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
             Self::None => None,
-            Self::AngleBracketed(v) => v.find_ptr(target, code),
-            Self::Parenthesized(v) => v.find_ptr(target, code),
+            Self::AngleBracketed(v) => v.find_ptr(locator, target, code),
+            Self::Parenthesized(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl_find_ptr_simple!(syn::PathSegment, ident, arguments);
 impl FindPtr for syn::PointerMutability {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Mut(v) => v.find_ptr(target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Mut(v) => v.find_ptr(locator, target, code),
         }
     }
 }
@@ -908,41 +916,41 @@ impl_find_ptr_simple!(
 // Ignore the `as` token because it belongs to the following `syn::Path` lookup.
 impl_find_ptr_simple!(syn::QSelf, lt_token, ty, /*as_token*/ gt_token);
 impl FindPtr for syn::RangeLimits {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::HalfOpen(v) => v.find_ptr(target, code),
-            Self::Closed(v) => v.find_ptr(target, code),
+            Self::HalfOpen(v) => v.find_ptr(locator, target, code),
+            Self::Closed(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl FindPtr for syn::Receiver {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
         // Without an explicit receiver type (`self: Type`), syn synthesizes `self.ty`.
 
-        compare_then_return_if_target!(self, target, code);
+        compare_then_return_if_target!(self, locator, target, code);
         self.attrs
-            .find_ptr(target, code)
-            .or_else(|| self.reference.find_ptr(target, code))
-            .or_else(|| self.mutability.find_ptr(target, code))
-            .or_else(|| self.self_token.find_ptr(target, code))
-            .or_else(|| self.colon_token.find_ptr(target, code))
+            .find_ptr(locator, target, code)
+            .or_else(|| self.reference.find_ptr(locator, target, code))
+            .or_else(|| self.mutability.find_ptr(locator, target, code))
+            .or_else(|| self.self_token.find_ptr(locator, target, code))
+            .or_else(|| self.colon_token.find_ptr(locator, target, code))
             .or_else(|| {
                 self.colon_token
                     .is_some()
-                    .then(|| self.ty.find_ptr(target, code))
+                    .then(|| self.ty.find_ptr(locator, target, code))
                     .flatten()
             })
     }
 }
 impl FindPtr for syn::ReturnType {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
             Self::Default => None,
             Self::Type(arrow, ty) => arrow
-                .find_ptr(target, code)
-                .or_else(|| ty.find_ptr(target, code)),
+                .find_ptr(locator, target, code)
+                .or_else(|| ty.find_ptr(locator, target, code)),
         }
     }
 }
@@ -961,47 +969,47 @@ impl_find_ptr_simple!(
     output
 );
 impl FindPtr for syn::StaticMutability {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Mut(v) => v.find_ptr(target, code),
+            Self::Mut(v) => v.find_ptr(locator, target, code),
             Self::None => None,
             _ => None,
         }
     }
 }
 impl FindPtr for syn::Stmt {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Local(v) => v.find_ptr(target, code),
-            Self::Item(v) => v.find_ptr(target, code),
+            Self::Local(v) => v.find_ptr(locator, target, code),
+            Self::Item(v) => v.find_ptr(locator, target, code),
             Self::Expr(expr, semi) => expr
-                .find_ptr(target, code)
-                .or_else(|| semi.find_ptr(target, code)),
-            Self::Macro(v) => v.find_ptr(target, code),
+                .find_ptr(locator, target, code)
+                .or_else(|| semi.find_ptr(locator, target, code)),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl_find_ptr_simple!(syn::StmtMacro, attrs, mac, semi_token);
 impl_find_ptr_simple!(syn::TraitBound, paren_token, modifier, lifetimes, path);
 impl FindPtr for syn::TraitBoundModifier {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
             Self::None => None,
-            Self::Maybe(v) => v.find_ptr(target, code),
+            Self::Maybe(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl FindPtr for syn::TraitItem {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Const(v) => v.find_ptr(target, code),
-            Self::Fn(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
+            Self::Const(v) => v.find_ptr(locator, target, code),
+            Self::Fn(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -1032,23 +1040,23 @@ impl_find_ptr_simple!(
 );
 impl_find_ptr_simple!(syn::TraitItemMacro, attrs, mac, semi_token);
 impl FindPtr for syn::Type {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Array(v) => v.find_ptr(target, code),
-            Self::BareFn(v) => v.find_ptr(target, code),
-            Self::Group(v) => v.find_ptr(target, code),
-            Self::ImplTrait(v) => v.find_ptr(target, code),
-            Self::Infer(v) => v.find_ptr(target, code),
-            Self::Macro(v) => v.find_ptr(target, code),
-            Self::Never(v) => v.find_ptr(target, code),
-            Self::Paren(v) => v.find_ptr(target, code),
-            Self::Path(v) => v.find_ptr(target, code),
-            Self::Ptr(v) => v.find_ptr(target, code),
-            Self::Reference(v) => v.find_ptr(target, code),
-            Self::Slice(v) => v.find_ptr(target, code),
-            Self::TraitObject(v) => v.find_ptr(target, code),
-            Self::Tuple(v) => v.find_ptr(target, code),
+            Self::Array(v) => v.find_ptr(locator, target, code),
+            Self::BareFn(v) => v.find_ptr(locator, target, code),
+            Self::Group(v) => v.find_ptr(locator, target, code),
+            Self::ImplTrait(v) => v.find_ptr(locator, target, code),
+            Self::Infer(v) => v.find_ptr(locator, target, code),
+            Self::Macro(v) => v.find_ptr(locator, target, code),
+            Self::Never(v) => v.find_ptr(locator, target, code),
+            Self::Paren(v) => v.find_ptr(locator, target, code),
+            Self::Path(v) => v.find_ptr(locator, target, code),
+            Self::Ptr(v) => v.find_ptr(locator, target, code),
+            Self::Reference(v) => v.find_ptr(locator, target, code),
+            Self::Slice(v) => v.find_ptr(locator, target, code),
+            Self::TraitObject(v) => v.find_ptr(locator, target, code),
+            Self::Tuple(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
@@ -1088,24 +1096,24 @@ impl_find_ptr_simple!(
     default
 );
 impl FindPtr for syn::TypeParamBound {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Trait(v) => v.find_ptr(target, code),
-            Self::Lifetime(v) => v.find_ptr(target, code),
-            Self::PreciseCapture(v) => v.find_ptr(target, code),
+            Self::Trait(v) => v.find_ptr(locator, target, code),
+            Self::Lifetime(v) => v.find_ptr(locator, target, code),
+            Self::PreciseCapture(v) => v.find_ptr(locator, target, code),
             Self::Verbatim(_) => None,
             _ => None,
         }
     }
 }
 impl FindPtr for syn::UnOp {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Deref(v) => v.find_ptr(target, code),
-            Self::Not(v) => v.find_ptr(target, code),
-            Self::Neg(v) => v.find_ptr(target, code),
+            Self::Deref(v) => v.find_ptr(locator, target, code),
+            Self::Not(v) => v.find_ptr(locator, target, code),
+            Self::Neg(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
@@ -1116,25 +1124,25 @@ impl_find_ptr_simple!(syn::UseName, ident);
 impl_find_ptr_simple!(syn::UsePath, ident, colon2_token, tree);
 impl_find_ptr_simple!(syn::UseRename, ident, as_token, rename);
 impl FindPtr for syn::UseTree {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Path(v) => v.find_ptr(target, code),
-            Self::Name(v) => v.find_ptr(target, code),
-            Self::Rename(v) => v.find_ptr(target, code),
-            Self::Glob(v) => v.find_ptr(target, code),
-            Self::Group(v) => v.find_ptr(target, code),
+            Self::Path(v) => v.find_ptr(locator, target, code),
+            Self::Name(v) => v.find_ptr(locator, target, code),
+            Self::Rename(v) => v.find_ptr(locator, target, code),
+            Self::Glob(v) => v.find_ptr(locator, target, code),
+            Self::Group(v) => v.find_ptr(locator, target, code),
         }
     }
 }
 impl_find_ptr_simple!(syn::Variadic, attrs, pat, dots, comma);
 impl_find_ptr_simple!(syn::Variant, attrs, ident, fields, discriminant);
 impl FindPtr for syn::Visibility {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Public(v) => v.find_ptr(target, code),
-            Self::Restricted(v) => v.find_ptr(target, code),
+            Self::Public(v) => v.find_ptr(locator, target, code),
+            Self::Restricted(v) => v.find_ptr(locator, target, code),
             Self::Inherited => None,
         }
     }
@@ -1142,11 +1150,11 @@ impl FindPtr for syn::Visibility {
 impl_find_ptr_simple!(syn::VisRestricted, pub_token, paren_token, in_token, path);
 impl_find_ptr_simple!(syn::WhereClause, where_token, predicates);
 impl FindPtr for syn::WherePredicate {
-    fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        compare_then_return_if_target!(self, target, code);
+    fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()> {
+        compare_then_return_if_target!(self, locator, target, code);
         match self {
-            Self::Lifetime(v) => v.find_ptr(target, code),
-            Self::Type(v) => v.find_ptr(target, code),
+            Self::Lifetime(v) => v.find_ptr(locator, target, code),
+            Self::Type(v) => v.find_ptr(locator, target, code),
             _ => None,
         }
     }
