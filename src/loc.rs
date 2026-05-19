@@ -4,95 +4,82 @@ use once_cell::sync::{Lazy, OnceCell};
 use std::{
     any::{self, Any, TypeId},
     borrow::{Borrow, Cow},
-    cell::RefCell,
     hash::Hash,
-    pin::Pin,
+    ops::Deref,
     sync::Arc,
-    sync::RwLock,
 };
 
-/// Global [`Locator`] shared across threads.
-static SHARED_LOCATOR: Lazy<RwLock<Locator>> = Lazy::new(|| RwLock::new(Locator::default()));
-
-thread_local! {
-    /// Thread local [`Locator`].
-    static THREAD_LOCAL_LOCATOR: RefCell<Option<Locator>> = const { RefCell::new(None) };
-}
-
-pub fn enable_thread_local(en: bool) {
-    THREAD_LOCAL_LOCATOR.with(|locator| {
-        let mut locator = locator.borrow_mut();
-        if en {
-            *locator = Some(Locator::default());
-        } else {
-            *locator = None;
-        }
-    });
-}
-
-pub fn is_located<Q>(file_path: &Q) -> bool
+pub fn locate<T>(file_path: &str, code: &str) -> Result<Located<T>>
 where
-    for<'a> Interned<'a, str>: Borrow<Q>,
-    Q: Hash + Eq + ?Sized,
+    T: syn::parse::Parse + Locate,
 {
-    with_locator(|locator| locator.contains_file(file_path))
+    Located::new(syn::parse_str::<T>(code)?, file_path, code)
 }
 
-/// Clears the global location storage.
-pub fn clear() {
-    with_locator_mut(|locator| locator.clear())
+pub struct Located<T: Locate> {
+    syntax: Box<T>,
+    locator: Locator,
 }
 
-/// Uses the thread-local locator when enabled, otherwise falls back to the shared locator.
-fn with_locator_mut<F: FnOnce(&mut Locator) -> R, R>(f: F) -> R {
-    THREAD_LOCAL_LOCATOR.with(|locator| {
-        let mut locator = locator.borrow_mut();
-        if let Some(locator) = &mut *locator {
-            f(locator)
-        } else {
-            let mut locator = SHARED_LOCATOR.write().unwrap();
-            f(&mut locator)
-        }
-    })
+impl<T: Locate> Located<T> {
+    pub fn new(syntax: T, file_path: &str, code: impl Into<Arc<str>>) -> Result<Self> {
+        let syntax = Box::new(syntax);
+        let mut locator = Locator::default();
+        syntax.locate_as_entry(&mut locator, file_path, code)?;
+        Ok(Self { syntax, locator })
+    }
+
+    pub fn syntax(&self) -> &T {
+        &self.syntax
+    }
+
+    pub fn locator(&self) -> &Locator {
+        &self.locator
+    }
+
+    pub fn location<N: Locate + ?Sized>(&self, node: &N) -> Location {
+        node.location(&self.locator)
+    }
+
+    pub fn location_message<N: Locate + ?Sized>(&self, node: &N) -> String {
+        node.location_message(&self.locator)
+    }
+
+    pub fn code<N: Locate + ?Sized>(&self, node: &N) -> String {
+        node.code(&self.locator)
+    }
 }
 
-/// Uses the thread-local locator when enabled, otherwise falls back to the shared locator.
-fn with_locator<F: FnOnce(&Locator) -> R, R>(f: F) -> R {
-    THREAD_LOCAL_LOCATOR.with(|locator| {
-        let locator = locator.borrow();
-        if let Some(locator) = &*locator {
-            f(locator)
-        } else {
-            let mut locator = SHARED_LOCATOR.read().unwrap();
-            f(&mut locator)
-        }
-    })
+impl<T: Locate> Deref for Located<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.syntax()
+    }
 }
 
 pub trait LocateEntry: Locate {
-    fn locate_as_entry(self: Pin<&Self>, file_path: &str, code: impl Into<Arc<str>>) -> Result<()> {
-        let loc = self.location(file_path, code)?;
-
-        with_locator_mut(|locator| {
-            let Some(code) = locator.filtered_code_ptr(file_path) else {
-                return Err(format!("failed to find the file `{file_path}`").into());
-            };
-
-            // Safety: Locating only reads the filtered code. The stored Arc keeps this pointer
-            // valid for the duration of the call.
-            unsafe {
-                let code = code.as_ref().unwrap_unchecked();
-                self.locate(locator, loc.file_path, code, 0);
-            }
-
-            Ok(())
-        })
-    }
-
-    #[doc(hidden)]
-    fn location(self: Pin<&Self>, file_path: &str, code: impl Into<Arc<str>>) -> Result<Location> {
+    fn locate_as_entry(
+        &self,
+        locator: &mut Locator,
+        file_path: &str,
+        code: impl Into<Arc<str>>,
+    ) -> Result<()> {
         let code: Arc<str> = code.into();
-        with_locator_mut(|locator| locator.insert_file(&*self, file_path, code))
+        let loc = locator.insert_file(self, file_path, code)?;
+
+        let Some(code) = locator.filtered_code_ptr(file_path) else {
+            return Err(format!("failed to find the file `{file_path}`").into());
+        };
+
+        // Safety: Locating only reads the filtered code. The stored Arc keeps this pointer
+        // valid for the duration of the call.
+        unsafe {
+            let code = code.as_ref().unwrap_unchecked();
+            self.locate(locator, loc.file_path, code, 0);
+        }
+
+        Ok(())
     }
 }
 
@@ -125,15 +112,8 @@ pub trait Locate: Any {
         loc
     }
 
-    fn location(&self) -> Location {
-        with_locator(|locator| {
-            locator.get_location(self).unwrap_or_else(|| {
-                panic!(
-                    "failed to find the location of `{}`. did you forget `Locate::locate`?",
-                    any::type_name::<Self>()
-                )
-            })
-        })
+    fn location(&self, locator: &Locator) -> Location {
+        self._location(locator)
     }
 
     fn _location(&self, locator: &Locator) -> Location {
@@ -145,8 +125,8 @@ pub trait Locate: Any {
         })
     }
 
-    fn location_message(&self) -> String {
-        with_locator(|locator| {
+    fn location_message(&self, locator: &Locator) -> String {
+        (|| {
             let loc = locator.get_location(self)?;
             let path = loc.file_path;
             let code = locator.get_original_code(&path)?;
@@ -157,7 +137,7 @@ pub trait Locate: Any {
                 + 1;
             let content = &code[loc.start..loc.end];
             Some(format!("{path}:{line}: {content}"))
-        })
+        })()
         .unwrap_or_else(|| {
             panic!(
                 "failed to find the location of `{}`. did you forget `Locate::locate`?",
@@ -166,14 +146,14 @@ pub trait Locate: Any {
         })
     }
 
-    fn code(&self) -> String {
-        with_locator(|locator| {
+    fn code(&self, locator: &Locator) -> String {
+        (|| {
             let loc = locator.get_location(self)?;
             let path = loc.file_path;
             let code = locator.get_original_code(&path)?;
             let content = &code[loc.start..loc.end];
             Some(content.to_owned())
-        })
+        })()
         .unwrap_or_else(|| {
             panic!(
                 "failed to find the location of `{}`. did you forget `Locate::locate`?",
@@ -520,11 +500,6 @@ impl Locator {
             code as *const str
         })
     }
-
-    fn clear(&mut self) {
-        self.files.clear();
-        self.map.clear();
-    }
 }
 
 /// Interns a string in a global and permanent interner.
@@ -592,7 +567,7 @@ impl LocationKey {
     }
 }
 
-/// We intern file path in a static interner. See [`intern_str`].
+/// File path interned in the crate's static string interner.
 pub type FilePath = Interned<'static, str>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

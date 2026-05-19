@@ -32,22 +32,22 @@ let code = "
         a: i32,
     }
 ";
-let syn = syn::parse_str::<syn::File>(code).unwrap();
-
 // Locate the syntax tree.
-let syn = std::pin::Pin::new(&syn);
-syn.locate_as_entry(file_path, code).unwrap();
+let located = syn_locator::locate::<syn::File>(file_path, code).unwrap();
 
 // Pick a syntax tree node.
-let item_struct = match &syn.items[0] {
+let item_struct = match &located.items[0] {
     syn::Item::Struct(item_struct) => item_struct,
     _ => unreachable!()
 };
 let field_ty = &item_struct.fields.iter().next().unwrap().ty;
 
 // Find the location of `i32` from the syntax tree node.
-assert_eq!(field_ty.location_message(), "/path/to/file.rs:3: i32");
-assert!(matches!(field_ty.location(), Location {
+assert_eq!(
+    located.location_message(field_ty),
+    "/path/to/file.rs:3: i32",
+);
+assert!(matches!(located.location(field_ty), Location {
     start: 29, // Byte offset.
     end: 32,
     ..
