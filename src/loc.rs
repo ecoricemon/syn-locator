@@ -9,6 +9,27 @@ use std::{
     sync::Arc,
 };
 
+/// Parses `code` as `T` and returns a syntax tree bundled with its locations.
+///
+/// This is the easiest entry point. The returned [`Located`] owns the parsed syntax tree and the
+/// [`Locator`] that stores locations for its nodes.
+///
+/// # Examples
+///
+/// ```rust
+/// use syn_locator::Location;
+///
+/// let code = "struct Foo { value: i32 }";
+/// let located = syn_locator::locate::<syn::File>("file.rs", code).unwrap();
+///
+/// let syn::Item::Struct(item_struct) = &located.items[0] else {
+///     unreachable!()
+/// };
+/// let field_ty = &item_struct.fields.iter().next().unwrap().ty;
+///
+/// assert_eq!(located.code(field_ty), "i32");
+/// assert!(matches!(located.location(field_ty), Location { start: 20, end: 23, .. }));
+/// ```
 pub fn locate<T>(file_path: &str, code: &str) -> Result<Located<T>>
 where
     T: syn::parse::Parse + Locate,
@@ -16,12 +37,30 @@ where
     Located::new(syn::parse_str::<T>(code)?, file_path, code)
 }
 
+/// A parsed syntax tree bundled with the locator that belongs to it.
+///
+/// `Located<T>` keeps the syntax tree on the heap, so moving the wrapper does not move the syntax
+/// nodes whose addresses are used by the internal [`Locator`]. It dereferences to `T` for
+/// convenient access to the syntax tree.
 pub struct Located<T: Locate> {
     syntax: Box<T>,
     locator: Locator,
 }
 
 impl<T: Locate> Located<T> {
+    /// Creates a located wrapper from an already parsed syntax tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Located;
+    ///
+    /// let code = "fn foo() {}";
+    /// let syntax = syn::parse_str::<syn::ItemFn>(code).unwrap();
+    /// let located = Located::new(syntax, "file.rs", code).unwrap();
+    ///
+    /// assert_eq!(located.code(&located.sig.ident), "foo");
+    /// ```
     pub fn new(syntax: T, file_path: &str, code: impl Into<Arc<str>>) -> Result<Self> {
         let syntax = Box::new(syntax);
         let mut locator = Locator::default();
@@ -29,22 +68,79 @@ impl<T: Locate> Located<T> {
         Ok(Self { syntax, locator })
     }
 
+    /// Returns the located syntax tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.syntax().ident, "Foo");
+    /// ```
     pub fn syntax(&self) -> &T {
         &self.syntax
     }
 
+    /// Returns the locator associated with this syntax tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.syntax().ident.code(located.locator()), "Foo");
+    /// ```
     pub fn locator(&self) -> &Locator {
         &self.locator
     }
 
+    /// Returns the recorded location for `node`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// let loc = located.location(&located.ident);
+    /// assert_eq!(loc.start, 7);
+    /// assert_eq!(loc.end, 10);
+    /// ```
     pub fn location<N: Locate + ?Sized>(&self, node: &N) -> Location {
         node.location(&self.locator)
     }
 
+    /// Returns a compact `path:line: source` message for `node`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.location_message(&located.ident), "file.rs:1: Foo");
+    /// ```
     pub fn location_message<N: Locate + ?Sized>(&self, node: &N) -> String {
         node.location_message(&self.locator)
     }
 
+    /// Returns the exact source text recorded for `node`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.code(&located.ident), "Foo");
+    /// ```
     pub fn code<N: Locate + ?Sized>(&self, node: &N) -> String {
         node.code(&self.locator)
     }
@@ -58,7 +154,27 @@ impl<T: Locate> Deref for Located<T> {
     }
 }
 
+/// Low-level entry point for recording locations into an explicit [`Locator`].
+///
+/// Prefer [`locate`] or [`Located::new`] unless you need to manage a locator yourself. Since
+/// `Locator` keys nodes by address and type, keep the syntax tree at the same memory addresses for
+/// as long as the locator is used.
 pub trait LocateEntry: Locate {
+    /// Records locations for this syntax tree in `locator`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::{Locate, LocateEntry, Locator};
+    ///
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::default();
+    ///
+    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    ///
+    /// assert_eq!(syntax.ident.code(&locator), "Foo");
+    /// ```
     fn locate_as_entry(
         &self,
         locator: &mut Locator,
@@ -85,8 +201,28 @@ pub trait LocateEntry: Locate {
 
 impl<T: Locate> LocateEntry for T {}
 
+/// Provides source-location behavior for supported `syn` syntax nodes.
+///
+/// Most users call methods on [`Located`] instead of using this trait directly.
 pub trait Locate: Any {
     /// Finds a location in the given file path, code, and offset.
+    ///
+    /// This is the low-level hook used by parent nodes while walking the syntax tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, LocateEntry, Locator};
+    ///
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::default();
+    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    ///
+    /// let file_path = syntax.location(&locator).file_path;
+    /// let loc = syntax.find_loc(&mut locator, file_path, code, 0);
+    /// assert_eq!(&code[loc.start..loc.end], code);
+    /// ```
     fn find_loc(
         &self,
         locator: &mut Locator,
@@ -95,11 +231,43 @@ pub trait Locate: Any {
         offset: usize,
     ) -> Location;
 
+    /// Overrides this node's location in `locator`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, LocateEntry, Locator, Location};
+    ///
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::default();
+    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    ///
+    /// let loc = Location { file_path: syntax.location(&locator).file_path, start: 0, end: 0 };
+    /// syntax.ident.relocate(&mut locator, loc);
+    /// ```
     fn relocate(&self, locator: &mut Locator, loc: Location) {
         locator.set_location(self, loc);
     }
 
-    // Called by parent nodes while walking the syntax tree.
+    /// Locates this node and stores the result in `locator`.
+    ///
+    /// Called by parent nodes while walking the syntax tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, LocateEntry, Locator};
+    ///
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::default();
+    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    ///
+    /// let file_path = syntax.location(&locator).file_path;
+    /// let loc = syntax.ident.locate(&mut locator, file_path, code, 0);
+    /// assert_eq!(&code[loc.start..loc.end], "Foo");
+    /// ```
     fn locate(
         &self,
         locator: &mut Locator,
@@ -112,10 +280,36 @@ pub trait Locate: Any {
         loc
     }
 
+    /// Returns this node's recorded location from `locator`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// let loc = located.ident.location(located.locator());
+    /// assert_eq!(loc.start, 7);
+    /// assert_eq!(loc.end, 10);
+    /// ```
     fn location(&self, locator: &Locator) -> Location {
         self._location(locator)
     }
 
+    /// Returns this node's recorded location from a specific [`Locator`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// let loc = located.ident._location(located.locator());
+    /// assert_eq!(loc.start, 7);
+    /// assert_eq!(loc.end, 10);
+    /// ```
     fn _location(&self, locator: &Locator) -> Location {
         locator.get_location(self).unwrap_or_else(|| {
             panic!(
@@ -125,6 +319,17 @@ pub trait Locate: Any {
         })
     }
 
+    /// Returns a compact `path:line: source` message for this node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.ident.location_message(located.locator()), "file.rs:1: Foo");
+    /// ```
     fn location_message(&self, locator: &Locator) -> String {
         (|| {
             let loc = locator.get_location(self)?;
@@ -146,6 +351,17 @@ pub trait Locate: Any {
         })
     }
 
+    /// Returns the exact source text recorded for this node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::Locate;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.ident.code(located.locator()), "Foo");
+    /// ```
     fn code(&self, locator: &Locator) -> String {
         (|| {
             let loc = locator.get_location(self)?;
@@ -163,7 +379,29 @@ pub trait Locate: Any {
     }
 }
 
+/// Locates a group of child nodes as a single range.
+///
+/// This is a public implementation helper used by `Locate` implementations.
 pub trait LocateGroup {
+    /// Locates all nodes in the group and returns their combined range.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, LocateGroup, Locator};
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    /// let mut locator = Locator::default();
+    /// let file_path = located.location(&located.ident).file_path;
+    ///
+    /// let loc = (&located.struct_token, &located.ident).locate_as_group(
+    ///     &mut locator,
+    ///     file_path,
+    ///     "struct Foo;",
+    ///     0,
+    /// );
+    /// assert_eq!(loc.start, 0);
+    /// ```
     fn locate_as_group(
         &self,
         locator: &mut Locator,
@@ -171,6 +409,22 @@ pub trait LocateGroup {
         code: &str,
         offset: usize,
     ) -> Location;
+    /// Assigns the same location to every node in the group.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, LocateGroup, Locator, Location};
+    ///
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    /// let mut locator = Locator::default();
+    /// let loc = Location {
+    ///     file_path: located.location(&located.ident).file_path,
+    ///     start: 0,
+    ///     end: 0,
+    /// };
+    /// (&located.struct_token, &located.ident).relocate_as_group(&mut locator, loc);
+    /// ```
     fn relocate_as_group(&self, locator: &mut Locator, loc: Location);
 }
 
@@ -289,10 +543,17 @@ impl_locate_group!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ; 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 impl_locate_group!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ; 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 impl_locate_group!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 ; 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
+/// Helper for locating syntax surrounded by a paired token.
+///
+/// This is used by `Locate` implementations for braces, brackets, and parentheses.
 pub struct Surround<'s, F, S, I, B> {
+    /// Nodes that appear before the surrounding token.
     pub front: F,
+    /// The paired token that surrounds `inner`.
     pub surround: &'s S,
+    /// Nodes inside the surrounding token.
     pub inner: I,
+    /// Nodes that appear after the surrounding token.
     pub back: B,
 }
 
@@ -303,6 +564,24 @@ where
     I: LocateGroup,
     B: LocateGroup,
 {
+    /// Locates the surrounding token, its inner nodes, and adjacent groups.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, Locator, Surround};
+    ///
+    /// let located = syn_locator::locate::<syn::Block>("block.rs", "{ value }").unwrap();
+    /// let helper = Surround {
+    ///     front: (),
+    ///     surround: &located.brace_token,
+    ///     inner: &located.stmts,
+    ///     back: (),
+    /// };
+    /// let mut locator = Locator::default();
+    /// let loc = helper.locate(&mut locator, located.location(&located.brace_token).file_path, "{ value }", 0);
+    /// assert_eq!(loc.start, 0);
+    /// ```
     pub fn locate(
         &self,
         locator: &mut Locator,
@@ -357,10 +636,15 @@ where
     }
 }
 
+/// Helper for locating qualified paths that contain a [`syn::QSelf`].
 pub struct Qualified<'a, F, B> {
+    /// Nodes that appear before the qualified self type.
     pub front: F,
+    /// The qualified self type, such as `<T as Trait>`.
     pub qself: &'a syn::QSelf,
+    /// The path associated with `qself`.
     pub path: &'a syn::Path,
+    /// Nodes that appear after the path.
     pub back: B,
 }
 
@@ -369,6 +653,27 @@ where
     F: LocateGroup,
     B: LocateGroup,
 {
+    /// Locates a qualified self type together with its associated path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use syn_locator::{Locate, Locator, Qualified};
+    ///
+    /// let located = syn_locator::locate::<syn::ItemType>(
+    ///     "qualified.rs",
+    ///     "type Assoc = <T as Trait>::Item;",
+    /// ).unwrap();
+    /// let syn::Type::Path(type_path) = located.ty.as_ref() else {
+    ///     unreachable!()
+    /// };
+    /// let qself = type_path.qself.as_ref().unwrap();
+    /// let helper = Qualified { front: (), qself, path: &type_path.path, back: () };
+    ///
+    /// let mut locator = Locator::default();
+    /// let loc = helper.locate(&mut locator, located.location(qself).file_path, "type Assoc = <T as Trait>::Item;", 13);
+    /// assert_eq!(loc.start, 13);
+    /// ```
     pub fn locate(
         &self,
         locator: &mut Locator,
@@ -428,6 +733,9 @@ where
     }
 }
 
+/// Storage for source files and syntax-node locations.
+///
+/// Most users do not need this type directly because [`Located`] owns one internally.
 #[derive(Default)]
 pub struct Locator {
     files: Map<FilePath, Content>,
@@ -570,8 +878,10 @@ impl LocationKey {
 /// File path interned in the crate's static string interner.
 pub type FilePath = Interned<'static, str>;
 
+/// Byte range for a syntax node in a source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Location {
+    /// File path associated with this location.
     pub file_path: FilePath,
 
     /// Byte index into the code.
@@ -4428,9 +4738,23 @@ where
 
 // === Helper functions ===
 
+/// Low-level helpers for locating literal token text.
 pub mod helper {
     use super::*;
 
+    /// Finds the next occurrence of a character token at or after `offset`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::helper;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemFn>("file.rs", "fn foo() {}").unwrap();
+    /// let loc = helper::char_location(located.location(&located.sig.ident).file_path, "fn foo() {}", 0, '(');
+    ///
+    /// assert_eq!(loc.start, 6);
+    /// assert_eq!(loc.end, 7);
+    /// ```
     pub fn char_location(
         file_path: FilePath,
         code: &str,
@@ -4450,6 +4774,19 @@ pub mod helper {
         }
     }
 
+    /// Finds the next occurrence of a string token at or after `offset`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::helper;
+    ///
+    /// let located = syn_locator::locate::<syn::ItemFn>("file.rs", "fn foo() {}").unwrap();
+    /// let loc = helper::str_location(located.location(&located.sig.ident).file_path, "fn foo() {}", 0, "foo");
+    ///
+    /// assert_eq!(loc.start, 3);
+    /// assert_eq!(loc.end, 6);
+    /// ```
     pub fn str_location(file_path: FilePath, code: &str, offset: usize, content: &str) -> Location {
         let cur_code = &code[offset..];
 
