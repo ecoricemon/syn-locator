@@ -1,7 +1,22 @@
 use super::{Locate, Located, Locator};
 use std::any::{Any, TypeId};
 
+/// Finds a descendant syntax node by its type and source text.
+///
+/// This trait is available with the `find` feature. For the easiest API, use [`Located::find`].
 pub trait Find<Output: Any> {
+    /// Returns the first descendant of type `Output` whose located source text equals `code`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::{Find, Locate};
+    ///
+    /// let located = syn_locator::locate::<syn::ItemFn>("find.rs", "fn foo(value: i32) {}").unwrap();
+    ///
+    /// let ty: &syn::Type = located.syntax().find(located.locator(), "i32").unwrap();
+    /// assert_eq!(ty.code(located.locator()), "i32");
+    /// ```
     fn find(&self, locator: &Locator, code: &str) -> Option<&Output>;
 }
 
@@ -17,12 +32,40 @@ where
 }
 
 impl<T: FindPtr + Locate> Located<T> {
+    /// Returns the first descendant of type `O` whose located source text equals `code`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let located = syn_locator::locate::<syn::ItemFn>("find.rs", "fn foo(value: i32) {}").unwrap();
+    ///
+    /// let ty: &syn::Type = located.find("i32").unwrap();
+    /// assert_eq!(located.code(ty), "i32");
+    /// ```
     pub fn find<O: Any>(&self, code: &str) -> Option<&O> {
         self.syntax().find(self.locator(), code)
     }
 }
 
+/// Type-erased search used to implement [`Find`].
+///
+/// Most users should call [`Find::find`] or [`Located::find`] instead.
 pub trait FindPtr {
+    /// Returns a raw pointer to the first descendant with the requested [`TypeId`] and source text.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::any::TypeId;
+    /// use syn_locator::{FindPtr, Locate};
+    ///
+    /// let located = syn_locator::locate::<syn::ItemFn>("file.rs", "fn foo(value: i32) {}")
+    ///     .unwrap();
+    /// let ptr = located.syntax().find_ptr(located.locator(), TypeId::of::<syn::Type>(), "i32")
+    ///     .unwrap();
+    /// let ty = unsafe { (ptr as *const syn::Type).as_ref().unwrap() };
+    /// assert_eq!(ty.code(located.locator()), "i32");
+    /// ```
     fn find_ptr(&self, locator: &Locator, target: TypeId, code: &str) -> Option<*const ()>;
 }
 
