@@ -49,7 +49,9 @@ where
     D: Locate,
 {
     test(ancestor_code, |ancestor: &A, locator| {
-        let found: &D = ancestor.find(locator, descendant_code).unwrap();
+        let found: &D = ancestor
+            .find(locator, descendant_code)
+            .unwrap_or_else(|| panic!("failed to find `{descendant_code}` in `{ancestor_code}`"));
         assert_eq!(found.code(locator), descendant_code);
     })
 }
@@ -1191,6 +1193,7 @@ fn test_locate_for_expr() {
 
 #[test]
 fn test_locate_etc() {
+    test_located_wrapper();
     test_locate_location();
     test_locate_for_captured_param();
     test_locate_for_bound_lifetimes();
@@ -1198,6 +1201,24 @@ fn test_locate_etc() {
     test_locate_for_field_value();
     test_locate_for_generics();
     test_locate_for_qself();
+}
+
+fn test_located_wrapper() {
+    let code = "struct A { a: i32 }";
+    let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    let located = Located::new(syntax, &unique_name(), code).unwrap();
+
+    assert_eq!(located.syntax().ident, "A");
+    assert_eq!(located.ident, "A");
+    assert_eq!(located.code(&located.ident), "A");
+    assert_eq!(located.location(&located.ident).start, 7);
+    assert_eq!(located.location(&located.ident).end, 8);
+
+    let msg = located.location_message(&located.ident);
+    let start = msg.find(':').unwrap();
+    assert_eq!(&msg[start..], ":1: A");
+
+    assert_eq!(located.syntax().ident.code(located.locator()), "A");
 }
 
 fn test_locate_location() {
@@ -1825,6 +1846,157 @@ fn test_find_for_lit() {
 
 #[cfg(feature = "find")]
 #[test]
+fn test_find_for_composite_variants() {
+    fn assert_find_ptr<A, D>(ancestor: &A, locator: &Locator, code: &str)
+    where
+        A: FindPtr,
+        D: 'static,
+    {
+        assert!(
+            ancestor
+                .find_ptr(locator, std::any::TypeId::of::<D>(), code)
+                .is_some(),
+            "failed to find `{code}` as `{}`",
+            std::any::type_name::<D>()
+        );
+    }
+
+    test_find::<syn::ImplItem, syn::ImplItemConst>("const X: i32 = 1;", "const X: i32 = 1;")
+        .unwrap();
+    test_find::<syn::ImplItem, syn::ImplItemFn>("fn f(&self, x: i32) {}", "fn f(&self, x: i32) {}")
+        .unwrap();
+    test_find::<syn::ImplItem, syn::ImplItemType>("type T = i32;", "type T = i32;").unwrap();
+    test_find::<syn::ImplItem, syn::ImplItemMacro>("m!();", "m!();").unwrap();
+    test_find::<syn::ImplItem, syn::Receiver>("fn f(&self) {}", "&self").unwrap();
+    test_find::<syn::ImplItem, syn::PatType>("fn f(x: i32) {}", "x: i32").unwrap();
+
+    test_find::<syn::ForeignItem, syn::ForeignItemFn>("fn f(x: i32);", "fn f(x: i32);").unwrap();
+    test_find::<syn::ForeignItem, syn::ForeignItemStatic>("static X: i32;", "static X: i32;")
+        .unwrap();
+    test_find::<syn::ForeignItem, syn::ForeignItemType>("type T;", "type T;").unwrap();
+    test_find::<syn::ForeignItem, syn::ForeignItemMacro>("m!();", "m!();").unwrap();
+
+    test_find::<syn::ImplItem, syn::Token![const]>("const X: i32 = 1;", "const").unwrap();
+    test_find::<syn::ImplItem, syn::Token![fn]>("fn f(&self, x: i32) {}", "fn").unwrap();
+    test_find::<syn::ImplItem, syn::Token![type]>("type T = i32;", "type").unwrap();
+    test_find::<syn::ImplItem, syn::Path>("m!();", "m").unwrap();
+    test_find::<syn::ForeignItem, syn::Token![fn]>("fn f(x: i32);", "fn").unwrap();
+    test_find::<syn::ForeignItem, syn::Token![static]>("static X: i32;", "static").unwrap();
+    test_find::<syn::ForeignItem, syn::Token![type]>("type T;", "type").unwrap();
+    test_find::<syn::ForeignItem, syn::Path>("m!();", "m").unwrap();
+
+    test_find::<syn::ItemStruct, syn::FieldsUnnamed>("struct T(i32);", "(i32)").unwrap();
+    test_find::<syn::ItemFn, syn::LifetimeParam>("fn f<'a>() {}", "'a").unwrap();
+    test_find::<syn::ItemFn, syn::TypeParam>("fn f<T>() {}", "T").unwrap();
+    test_find::<syn::ItemFn, syn::ConstParam>("fn f<const N: usize>() {}", "const N: usize")
+        .unwrap();
+
+    test_find::<syn::ItemType, syn::GenericArgument>("type T = Foo<'a>;", "'a").unwrap();
+    test_find::<syn::ItemType, syn::GenericArgument>("type T = Vec<i32>;", "i32").unwrap();
+    test_find::<syn::ItemType, syn::GenericArgument>("type T = Array<3>;", "3").unwrap();
+    test_find::<syn::ItemType, syn::AssocType>("type T = Trait<Item = i32>;", "Item = i32")
+        .unwrap();
+    test_find::<syn::ItemType, syn::AssocConst>("type T = Trait<N = 3>;", "N = 3").unwrap();
+    test_find::<syn::ItemType, syn::Constraint>("type T = Trait<Item: Clone>;", "Item: Clone")
+        .unwrap();
+
+    let located = locate::<syn::ItemFn>(&unique_name(), "#[test] fn f() {}").unwrap();
+    assert_find_ptr::<_, syn::Path>(&located.attrs[0].meta, located.locator(), "test");
+
+    let located =
+        locate::<syn::ItemStruct>(&unique_name(), "#[derive(Clone, Debug)] struct T;").unwrap();
+    assert_find_ptr::<_, syn::MetaList>(
+        &located.attrs[0].meta,
+        located.locator(),
+        "derive(Clone, Debug)",
+    );
+
+    let located =
+        locate::<syn::ItemMod>(&unique_name(), "#[path = \"foo.rs\"] mod foo {}").unwrap();
+    assert_find_ptr::<_, syn::MetaNameValue>(
+        &located.attrs[0].meta,
+        located.locator(),
+        "path = \"foo.rs\"",
+    );
+
+    let located = locate::<syn::File>(&unique_name(), "macro_rules! m { () => {} }").unwrap();
+    let syn::Item::Macro(item_macro) = &located.items[0] else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::Path>(item_macro, located.locator(), "macro_rules");
+    assert_find_ptr::<_, syn::Ident>(item_macro, located.locator(), "m");
+    assert_find_ptr::<_, syn::token::Brace>(
+        &item_macro.mac.delimiter,
+        located.locator(),
+        "{ () => {} }",
+    );
+
+    let located = locate::<syn::ItemFn>(&unique_name(), "fn f() { m!(); }").unwrap();
+    let syn::Stmt::Macro(stmt_macro) = &located.block.stmts[0] else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::token::Paren>(&stmt_macro.mac.delimiter, located.locator(), "()");
+
+    let located = locate::<syn::ItemFn>(&unique_name(), "fn f() { m![]; }").unwrap();
+    let syn::Stmt::Macro(stmt_macro) = &located.block.stmts[0] else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::token::Bracket>(&stmt_macro.mac.delimiter, located.locator(), "[]");
+
+    let located = locate::<syn::ItemType>(&unique_name(), "type T = dyn Fn(i32) -> bool;").unwrap();
+    let syn::Type::TraitObject(trait_object) = located.ty.as_ref() else {
+        unreachable!()
+    };
+    let syn::TypeParamBound::Trait(trait_bound) = &trait_object.bounds[0] else {
+        unreachable!()
+    };
+    let syn::PathArguments::Parenthesized(args) = &trait_bound.path.segments[0].arguments else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::Type>(
+        &trait_bound.path.segments[0].arguments,
+        located.locator(),
+        "i32",
+    );
+    assert_find_ptr::<_, syn::ReturnType>(args, located.locator(), "-> bool");
+
+    let located = locate::<syn::ExprRange>(&unique_name(), "0..1").unwrap();
+    assert_find_ptr::<_, syn::Token![..]>(&located.limits, located.locator(), "..");
+
+    let located = locate::<syn::ExprRange>(&unique_name(), "0..=1").unwrap();
+    assert_find_ptr::<_, syn::Token![..=]>(&located.limits, located.locator(), "..=");
+
+    let located = locate::<syn::ItemFn>(
+        &unique_name(),
+        "fn f<'a, T>() -> impl Trait + use<'a, T> {}",
+    )
+    .unwrap();
+    let syn::ReturnType::Type(_, ty) = &located.sig.output else {
+        unreachable!()
+    };
+    let syn::Type::ImplTrait(ty_impl_trait) = &**ty else {
+        unreachable!()
+    };
+    let syn::TypeParamBound::PreciseCapture(capture) = &ty_impl_trait.bounds[1] else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::Lifetime>(&capture.params[0], located.locator(), "'a");
+    assert_find_ptr::<_, syn::Ident>(&capture.params[1], located.locator(), "T");
+
+    let located = locate::<syn::ItemType>(&unique_name(), "type T = Foo<'a, i32, 3>;").unwrap();
+    let syn::Type::Path(type_path) = located.ty.as_ref() else {
+        unreachable!()
+    };
+    let syn::PathArguments::AngleBracketed(args) = &type_path.path.segments[0].arguments else {
+        unreachable!()
+    };
+    assert_find_ptr::<_, syn::Lifetime>(&args.args[0], located.locator(), "'a");
+    assert_find_ptr::<_, syn::Type>(&args.args[1], located.locator(), "i32");
+    assert_find_ptr::<_, syn::Expr>(&args.args[2], located.locator(), "3");
+}
+
+#[cfg(feature = "find")]
+#[test]
 fn test_find_etc() {
     let code = "
     struct A {
@@ -1836,4 +2008,7 @@ fn test_find_etc() {
 
     let field: &syn::Field = syn.find(locator, "a: i32").unwrap();
     assert_eq!(field.code(locator), "a: i32");
+
+    let field: &syn::Field = located.find("a: i32").unwrap();
+    assert_eq!(located.code(field), "a: i32");
 }
