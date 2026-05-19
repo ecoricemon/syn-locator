@@ -661,7 +661,7 @@ impl_find_ptr_simple!(
     items
 );
 
-// Parse order is not the same as the order they are declared.
+// syn parses these fields in a different order from their struct declaration.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/item.rs#L1240
 impl FindPtr for syn::ItemMacro {
     fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
@@ -905,8 +905,7 @@ impl_find_ptr_simple!(
     bounds
 );
 
-// We ignore 'as' token because it means the following `syn::Path` is mixed
-// with this Qself.
+// Ignore the `as` token because it belongs to the following `syn::Path` lookup.
 impl_find_ptr_simple!(syn::QSelf, lt_token, ty, /*as_token*/ gt_token);
 impl FindPtr for syn::RangeLimits {
     fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
@@ -919,8 +918,7 @@ impl FindPtr for syn::RangeLimits {
 }
 impl FindPtr for syn::Receiver {
     fn find_ptr(&self, target: TypeId, code: &str) -> Option<*const ()> {
-        // If there is no colon, `self.ty` must be ignored because it is not
-        // constructed from source code.
+        // Without an explicit receiver type (`self: Type`), syn synthesizes `self.ty`.
 
         compare_then_return_if_target!(self, target, code);
         self.attrs

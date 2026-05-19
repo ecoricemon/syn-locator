@@ -16,6 +16,6 @@ pub use loc::*;
 type Result<T> = std::result::Result<T, Error>;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-// === Hash Map/Set used within this crate ===
+// === Hash map used within this crate ===
 
 type Map<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;

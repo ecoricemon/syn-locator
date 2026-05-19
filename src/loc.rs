@@ -43,8 +43,7 @@ pub fn clear() {
     with_locator_mut(|locator| locator.clear())
 }
 
-/// Thread-local locator is preferred if exists, otherwise shared locator will be chosen as a
-/// fallback.
+/// Uses the thread-local locator when enabled, otherwise falls back to the shared locator.
 fn with_locator_mut<F: FnOnce(&mut Locator) -> R, R>(f: F) -> R {
     THREAD_LOCAL_LOCATOR.with(|locator| {
         let mut locator = locator.borrow_mut();
@@ -57,8 +56,7 @@ fn with_locator_mut<F: FnOnce(&mut Locator) -> R, R>(f: F) -> R {
     })
 }
 
-/// Thread-local locator is preferred if exists, otherwise shared locator will be chosen as a
-/// fallback.
+/// Uses the thread-local locator when enabled, otherwise falls back to the shared locator.
 fn with_locator<F: FnOnce(&Locator) -> R, R>(f: F) -> R {
     THREAD_LOCAL_LOCATOR.with(|locator| {
         let locator = locator.borrow();
@@ -80,8 +78,8 @@ pub trait LocateEntry: Locate {
                 return Err(format!("failed to find the file `{file_path}`").into());
             };
 
-            // Safety: Locating doesn't modify code itself. Therefore, the address and its content
-            // will never change until end of this block.
+            // Safety: Locating only reads the filtered code. The stored Arc keeps this pointer
+            // valid for the duration of the call.
             unsafe {
                 let code = code.as_ref().unwrap_unchecked();
                 self.locate(locator, loc.file_path, code, 0);
@@ -114,7 +112,7 @@ pub trait Locate: Any {
         locator.set_location(self, loc);
     }
 
-    // call from parent node
+    // Called by parent nodes while walking the syntax tree.
     fn locate(
         &self,
         locator: &mut Locator,
@@ -211,8 +209,7 @@ macro_rules! impl_locate_group {
                 {
                     let ( $( [<this $i>] ),* ) = self;
 
-                    // Calls locate() on children.
-                    // Also, determines the end of this group.
+                    // Locates children and tracks the group's end.
                     let mut end = offset;
                     $(
                         let [<loc $i>] = [<this $i>].locate(locator, file_path, code, end);
@@ -221,7 +218,7 @@ macro_rules! impl_locate_group {
                         }
                     )*
 
-                    // Determines the start of this group.
+                    // Determine the start of this group.
                     let mut start = usize::MAX;
                     $(
                         if [<loc $i>].start != [<loc $i>].end {
@@ -232,7 +229,7 @@ macro_rules! impl_locate_group {
                         start = offset;
                     }
 
-                    // Relocates empty children to the closest non-empty child.
+                    // Move empty children to the closest non-empty child.
                     let mut cur = end;
                     $(
                         if [<loc $ri>].start >= [<loc $ri>].end {
@@ -256,7 +253,7 @@ macro_rules! impl_locate_group {
                 fn relocate_as_group(&self, locator: &mut Locator, loc: Location) {
                     let ( $( [<this $i>] ),* ) = self;
 
-                    // Calls relocate() on children.
+                    // Propagate relocation to children.
                     $(
                         [<this $i>].relocate(locator, loc);
                     )*
@@ -333,7 +330,7 @@ where
         code: &str,
         offset: usize,
     ) -> Location {
-        // Calls locate() on fields.
+        // Locate the surrounding token and fields.
         let front_loc = self.front.locate_as_group(locator, file_path, code, offset);
         let surround_loc = self
             .surround
@@ -344,7 +341,7 @@ where
             .back
             .locate_as_group(locator, file_path, code, surround_loc.end);
 
-        // Relocates front if needed
+        // Move an empty front group to the surrounding token.
         let mut start = front_loc.start;
         if front_loc.start == front_loc.end {
             self.front.relocate_as_group(
@@ -358,7 +355,7 @@ where
             start = surround_loc.start;
         }
 
-        // Relocates back if needed
+        // Move an empty back group to the surrounding token.
         let mut end = back_loc.end;
         if back_loc.start == back_loc.end {
             self.back.relocate_as_group(
@@ -399,15 +396,14 @@ where
         code: &str,
         offset: usize,
     ) -> Location {
-        // Calls locate() on fields.
+        // Locate the qualified self type and path.
         let front_loc = self.front.locate_as_group(locator, file_path, code, offset);
 
         let qself_loc = self.qself.locate(locator, file_path, code, front_loc.end);
         let qself_mid_loc = self.qself.as_token._location(locator);
 
-        // Path will be evaluated on something like `a::b::Trait>::Assoc`. The
-        // string contains '>' though, it would be fine because we will skip it
-        // during string matching.
+        // The path search starts in text like `a::b::Trait>::Assoc`. The extra `>` is fine
+        // because string matching skips over it.
         let path_loc = self
             .path
             .locate(locator, file_path, code, qself_mid_loc.end);
@@ -416,7 +412,7 @@ where
             .back
             .locate_as_group(locator, file_path, code, path_loc.end);
 
-        // Relocates front if needed
+        // Move an empty front group to the qualified self type.
         let mut start = front_loc.start;
         if front_loc.start == front_loc.end {
             self.front.relocate_as_group(
@@ -430,7 +426,7 @@ where
             start = qself_loc.start;
         }
 
-        // Relocates back if needed
+        // Move an empty back group to the path.
         let mut end = back_loc.end;
         if back_loc.start == back_loc.end {
             self.back.relocate_as_group(
@@ -467,7 +463,7 @@ impl Locator {
         self.files.contains_key(file_path)
     }
 
-    /// Inserts file then returns its index.
+    /// Inserts a file and returns its full-file location.
     fn insert_file<T: Any + ?Sized>(
         &mut self,
         syn_file: &T,
@@ -561,8 +557,7 @@ impl Content {
 
         static RE: OnceCell<Regex> = OnceCell::new();
 
-        // Regex doesn't support recursion, so that we cannot remove nested
-        // comments. We need to write code from scratch to do that.
+        // Regex does not support recursion, so nested block comments are not handled here.
         let re = RE.get_or_init(|| {
             Regex::new(
                 r#"(?x)
@@ -584,8 +579,7 @@ struct LocationKey {
     /// For hashing.
     ptr: usize,
 
-    // We need a more information to distinguish between a struct and its first field because they
-    // have the same address. We use type id for the purpose.
+    // The type id distinguishes a struct from its first field when both have the same address.
     ty: TypeId,
 }
 
@@ -605,10 +599,10 @@ pub type FilePath = Interned<'static, str>;
 pub struct Location {
     pub file_path: FilePath,
 
-    /// Byte index to the code.
+    /// Byte index into the code.
     pub start: usize,
 
-    /// Byte index to the code. Exclusive
+    /// Exclusive byte index into the code.
     pub end: usize,
 }
 
@@ -1848,9 +1842,8 @@ impl Locate for syn::FieldMutability {
     }
 }
 
-// `member` is parsed from token stream. But if there's no following colon token
-// and `pat` after the member, `pat` is cloned from the `member` instead of
-// being parsed from token stream.
+// When a field pattern has no colon, syn parses `member` from the token stream and clones `pat`
+// from `member`, so `pat` does not have its own source span.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/pat.rs#L562-L594
 impl Locate for syn::FieldPat {
     fn find_loc(
@@ -1929,9 +1922,8 @@ impl Locate for syn::FieldsUnnamed {
     }
 }
 
-// `member` is parsed from token stream. But if there's no following colon token
-// and `expr` after the member, `expr` is cloned from the `member` instead of
-// being parsed from token stream.
+// When a field value has no colon, syn parses `member` from the token stream and clones `expr`
+// from `member`, so `expr` does not have its own source span.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/expr.rs#L2744-L2755
 impl Locate for syn::FieldValue {
     fn find_loc(
@@ -2458,7 +2450,7 @@ impl Locate for syn::ItemImpl {
                     &self.defaultness,
                     &self.unsafety,
                     &self.impl_token,
-                    // `self.generics.where_clause` is behind the `self.self_ty`
+                    // The `where` clause follows `self.self_ty`.
                     &self.generics.lt_token,
                     &self.generics.params,
                     &self.generics.gt_token,
@@ -2480,7 +2472,7 @@ impl Locate for syn::ItemImpl {
                     &self.defaultness,
                     &self.unsafety,
                     &self.impl_token,
-                    // `self.generics.where_clause` is behind the `self.self_ty`
+                    // The `where` clause follows `self.self_ty`.
                     &self.generics.lt_token,
                     &self.generics.params,
                     &self.generics.gt_token,
@@ -2499,7 +2491,7 @@ impl Locate for syn::ItemImpl {
     }
 }
 
-// Parse order is not the same as the order they are declared.
+// syn parses these fields in a different order from their struct declaration.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/item.rs#L1240
 impl Locate for syn::ItemMacro {
     fn find_loc(
@@ -2517,7 +2509,7 @@ impl Locate for syn::ItemMacro {
                 &self.ident,
             ),
             surround: &self.mac.delimiter,
-            inner: (), // tokens are not processed yet.
+            inner: (), // Macro tokens are not processed yet.
             back: &self.semi_token,
         }
         .locate(locator, file_path, code, offset)
@@ -3509,8 +3501,7 @@ impl Locate for syn::Receiver {
         code: &str,
         offset: usize,
     ) -> Location {
-        // If there is no colon, `self.ty` must be ignored because it is not
-        // constructed from source code.
+        // Without an explicit receiver type (`self: Type`), syn synthesizes `self.ty`.
 
         if let Some((and_token, reference)) = &self.reference {
             if let Some(colon_token) = &self.colon_token {
@@ -3587,7 +3578,7 @@ impl Locate for syn::Signature {
                 &self.abi,
                 &self.fn_token,
                 &self.ident,
-                // `self.generics.where_clause` is behind the `self.output`
+                // The `where` clause follows the return type.
                 &self.generics.lt_token,
                 &self.generics.params,
                 &self.generics.gt_token,
@@ -3666,7 +3657,7 @@ impl Locate for syn::TraitBound {
         code: &str,
         offset: usize,
     ) -> Location {
-        // self.paren_token is always Null according to syn parsing.
+        // syn always parses this paren token as empty.
         (&self.modifier, &self.lifetimes, &self.path)
             .locate_as_group(locator, file_path, code, offset)
     }
@@ -4337,9 +4328,9 @@ impl Locate for syn::WherePredicate {
     }
 }
 
-/// [`syn::WhereClause`] in [`syn::Generics`] could be somewhere outside the `syn::Generics`
-/// itself. For exmaple, `syn::WhereClause` in "impl<T> Trait for S<T> where T: Clone" is behind
-/// the self type, "S<T>". By this reason, we need to set the location of `syn::Generics` manually.
+/// A [`syn::WhereClause`] inside [`syn::Generics`] can appear outside the generic parameter list.
+/// For example, in `impl<T> Trait for S<T> where T: Clone`, the where clause follows the self
+/// type `S<T>`. Because of this, the location of `syn::Generics` has to be set manually.
 fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::Generics) {
     let start = locator.get_location(&generics.lt_token).unwrap().start;
 
@@ -4348,9 +4339,8 @@ fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::G
     } else {
         let end = locator.get_location(&generics.gt_token).unwrap().end;
 
-        // The location of `where_clause` could be different with 'gt_token' because `where_clause`
-        // could be split from other elements of the generics. But if `where_clause` is empty, it
-        // looks something weird. So, we then reset it to the location of `gt_token`.
+        // An empty `where_clause` would otherwise keep an unrelated fallback location, so place it
+        // at the end of the generic parameter list.
         let loc = Location {
             file_path,
             start: end,
@@ -4361,7 +4351,7 @@ fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::G
         end
     };
 
-    // Sets the location of `generics`.
+    // Set the location of `generics`.
     locator.set_location(
         generics,
         Location {
