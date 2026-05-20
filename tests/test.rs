@@ -225,6 +225,113 @@ fn test_locate_for_item() {
 }
 
 #[test]
+fn test_locate_ignores_comments() {
+    let code = "// const X: i32 = 0;\nconst X: i32 = 1;";
+    test(code, |file: &syn::File, locator| {
+        let syn::Item::Const(item_const) = &file.items[0] else {
+            panic!()
+        };
+        assert_eq!(item_const.code(locator), "const X: i32 = 1;");
+    })
+    .unwrap();
+
+    let code = "/* const X: i32 = 0; */ const X: i32 = 1;";
+    test(code, |file: &syn::File, locator| {
+        let syn::Item::Const(item_const) = &file.items[0] else {
+            panic!()
+        };
+        assert_eq!(item_const.code(locator), "const X: i32 = 1;");
+    })
+    .unwrap();
+
+    let code = "/* outer /* inner */ const X: i32 = 0; */ const X: i32 = 1;";
+    test(code, |file: &syn::File, locator| {
+        let syn::Item::Const(item_const) = &file.items[0] else {
+            panic!()
+        };
+        assert_eq!(item_const.code(locator), "const X: i32 = 1;");
+    })
+    .unwrap();
+
+    let code = "{ let a = 1; /* let b = 2; */ let b = 3; }";
+    test(code, |block: &syn::Block, locator| {
+        assert_eq!(block.stmts[0].code(locator), "let a = 1;");
+        assert_eq!(block.stmts[1].code(locator), "let b = 3;");
+    })
+    .unwrap();
+
+    let code = "fn f<'a, /* ignored */ 'b>(_: &'a str, _: &'b str) {}";
+    test(code, |item_fn: &syn::ItemFn, locator| {
+        assert_eq!(item_fn.sig.generics.params[1].code(locator), "'b");
+    })
+    .unwrap();
+
+    let code = r###"let a = (
+        "// not a comment",
+        "/* also not a comment */",
+        "escaped quote \" // still not a comment",
+        b"// not a byte-string comment",
+        c"/* not a c-string comment */",
+        r##"/* not a raw-string comment */"##,
+        br##"// not a raw byte-string comment"##,
+        cr##"/* not a raw c-string comment */"##,
+    );"###;
+    test(code, |stmt: &syn::Stmt, locator| {
+        let syn::Expr::Tuple(expr_tuple) = get_init_expr_from_stmt(stmt) else {
+            panic!()
+        };
+        assert_eq!(expr_tuple.elems[0].code(locator), r#""// not a comment""#);
+        assert_eq!(
+            expr_tuple.elems[1].code(locator),
+            r#""/* also not a comment */""#
+        );
+        assert_eq!(
+            expr_tuple.elems[2].code(locator),
+            r#""escaped quote \" // still not a comment""#
+        );
+        assert_eq!(
+            expr_tuple.elems[3].code(locator),
+            r#"b"// not a byte-string comment""#
+        );
+        assert_eq!(
+            expr_tuple.elems[4].code(locator),
+            r#"c"/* not a c-string comment */""#
+        );
+        assert_eq!(
+            expr_tuple.elems[5].code(locator),
+            r###"r##"/* not a raw-string comment */"##"###
+        );
+        assert_eq!(
+            expr_tuple.elems[6].code(locator),
+            r###"br##"// not a raw byte-string comment"##"###
+        );
+        assert_eq!(
+            expr_tuple.elems[7].code(locator),
+            r###"cr##"/* not a raw c-string comment */"##"###
+        );
+    })
+    .unwrap();
+
+    let code = r#"{ let a = ('/', '*', '\'', '\u{2f}', b'/', b'*'); /* ignored */ let b = 1; }"#;
+    test(code, |block: &syn::Block, locator| {
+        let syn::Stmt::Local(local) = &block.stmts[0] else {
+            panic!()
+        };
+        let syn::Expr::Tuple(expr_tuple) = &*local.init.as_ref().unwrap().expr else {
+            panic!()
+        };
+        assert_eq!(expr_tuple.elems[0].code(locator), "'/'");
+        assert_eq!(expr_tuple.elems[1].code(locator), "'*'");
+        assert_eq!(expr_tuple.elems[2].code(locator), r#"'\''"#);
+        assert_eq!(expr_tuple.elems[3].code(locator), r#"'\u{2f}'"#);
+        assert_eq!(expr_tuple.elems[4].code(locator), "b'/'");
+        assert_eq!(expr_tuple.elems[5].code(locator), "b'*'");
+        assert_eq!(block.stmts[1].code(locator), "let b = 1;");
+    })
+    .unwrap();
+}
+
+#[test]
 fn test_locate_for_ops() {
     // Expr::Binary
     for op in [
