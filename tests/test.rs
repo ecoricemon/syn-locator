@@ -1205,12 +1205,14 @@ fn test_locate_etc() {
 
 fn test_located_wrapper() {
     let code = "struct A { a: i32 }";
+    let file_path = unique_name();
     let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    let located = Located::new(syntax, &unique_name(), code).unwrap();
+    let located = Located::new(syntax, &file_path, code).unwrap();
 
     assert_eq!(located.syntax().ident, "A");
     assert_eq!(located.ident, "A");
     assert_eq!(located.code(&located.ident), "A");
+    assert_eq!(located.locator().file_path(), file_path);
     assert_eq!(located.location(&located.ident).start, 7);
     assert_eq!(located.location(&located.ident).end, 8);
 

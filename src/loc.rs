@@ -1,12 +1,9 @@
 use crate::{Map, Result};
-use any_intern::{DroplessInterner, Interned};
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use std::{
     any::{self, Any, TypeId},
-    borrow::{Borrow, Cow},
-    hash::Hash,
+    borrow::Cow,
     ops::Deref,
-    sync::Arc,
 };
 
 /// Parses `code` as `T` and returns a syntax tree bundled with its locations.
@@ -61,10 +58,10 @@ impl<T: Locate> Located<T> {
     ///
     /// assert_eq!(located.code(&located.sig.ident), "foo");
     /// ```
-    pub fn new(syntax: T, file_path: &str, code: impl Into<Arc<str>>) -> Result<Self> {
+    pub fn new(syntax: T, file_path: &str, code: impl Into<Box<str>>) -> Result<Self> {
         let syntax = Box::new(syntax);
-        let mut locator = Locator::default();
-        syntax.locate_as_entry(&mut locator, file_path, code)?;
+        let mut locator = Locator::new(file_path, code);
+        syntax.locate_as_entry(&mut locator)?;
         Ok(Self { syntax, locator })
     }
 
@@ -169,30 +166,22 @@ pub trait LocateEntry: Locate {
     ///
     /// let code = "struct Foo;";
     /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    /// let mut locator = Locator::default();
+    /// let mut locator = Locator::new("file.rs", code);
     ///
-    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     ///
     /// assert_eq!(syntax.ident.code(&locator), "Foo");
     /// ```
-    fn locate_as_entry(
-        &self,
-        locator: &mut Locator,
-        file_path: &str,
-        code: impl Into<Arc<str>>,
-    ) -> Result<()> {
-        let code: Arc<str> = code.into();
-        let loc = locator.insert_file(self, file_path, code)?;
-
-        let Some(code) = locator.filtered_code_ptr(file_path) else {
-            return Err(format!("failed to find the file `{file_path}`").into());
-        };
+    fn locate_as_entry(&self, locator: &mut Locator) -> Result<()> {
+        let loc = locator.location(0, locator.get_original_code().len());
+        locator.set_location(self, loc);
+        let code = locator.filtered_code_ptr();
 
         // Safety: Locating only reads the filtered code. The stored Arc keeps this pointer
         // valid for the duration of the call.
         unsafe {
             let code = code.as_ref().unwrap_unchecked();
-            self.locate(locator, loc.file_path, code, 0);
+            self.locate(locator, code, 0);
         }
 
         Ok(())
@@ -216,20 +205,13 @@ pub trait Locate: Any {
     ///
     /// let code = "struct Foo;";
     /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    /// let mut locator = Locator::default();
-    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     ///
-    /// let file_path = syntax.location(&locator).file_path;
-    /// let loc = syntax.find_loc(&mut locator, file_path, code, 0);
+    /// let loc = syntax.find_loc(&mut locator, code, 0);
     /// assert_eq!(&code[loc.start..loc.end], code);
     /// ```
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location;
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location;
 
     /// Overrides this node's location in `locator`.
     ///
@@ -240,10 +222,10 @@ pub trait Locate: Any {
     ///
     /// let code = "struct Foo;";
     /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    /// let mut locator = Locator::default();
-    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     ///
-    /// let loc = Location { file_path: syntax.location(&locator).file_path, start: 0, end: 0 };
+    /// let loc = Location { start: 0, end: 0 };
     /// syntax.ident.relocate(&mut locator, loc);
     /// ```
     fn relocate(&self, locator: &mut Locator, loc: Location) {
@@ -261,21 +243,14 @@ pub trait Locate: Any {
     ///
     /// let code = "struct Foo;";
     /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
-    /// let mut locator = Locator::default();
-    /// syntax.locate_as_entry(&mut locator, "file.rs", code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     ///
-    /// let file_path = syntax.location(&locator).file_path;
-    /// let loc = syntax.ident.locate(&mut locator, file_path, code, 0);
+    /// let loc = syntax.ident.locate(&mut locator, code, 0);
     /// assert_eq!(&code[loc.start..loc.end], "Foo");
     /// ```
-    fn locate(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        let loc = self.find_loc(locator, file_path, code, offset);
+    fn locate(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        let loc = self.find_loc(locator, code, offset);
         locator.set_location(self, loc);
         loc
     }
@@ -333,8 +308,8 @@ pub trait Locate: Any {
     fn location_message(&self, locator: &Locator) -> String {
         (|| {
             let loc = locator.get_location(self)?;
-            let path = loc.file_path;
-            let code = locator.get_original_code(&path)?;
+            let path = locator.file_path();
+            let code = locator.get_original_code();
             let line = code.as_bytes()[..loc.start]
                 .iter()
                 .filter(|&&b| b == b'\n')
@@ -365,8 +340,7 @@ pub trait Locate: Any {
     fn code(&self, locator: &Locator) -> String {
         (|| {
             let loc = locator.get_location(self)?;
-            let path = loc.file_path;
-            let code = locator.get_original_code(&path)?;
+            let code = locator.get_original_code();
             let content = &code[loc.start..loc.end];
             Some(content.to_owned())
         })()
@@ -388,42 +362,30 @@ pub trait LocateGroup {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use syn_locator::{Locate, LocateGroup, Locator};
+    /// use syn_locator::{Locate, LocateEntry, LocateGroup, Locator};
     ///
-    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
-    /// let mut locator = Locator::default();
-    /// let file_path = located.location(&located.ident).file_path;
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     ///
-    /// let loc = (&located.struct_token, &located.ident).locate_as_group(
-    ///     &mut locator,
-    ///     file_path,
-    ///     "struct Foo;",
-    ///     0,
-    /// );
+    /// let loc = (&syntax.struct_token, &syntax.ident).locate_as_group(&mut locator, code, 0);
     /// assert_eq!(loc.start, 0);
     /// ```
-    fn locate_as_group(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location;
+    fn locate_as_group(&self, locator: &mut Locator, code: &str, offset: usize) -> Location;
     /// Assigns the same location to every node in the group.
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use syn_locator::{Locate, LocateGroup, Locator, Location};
+    /// use syn_locator::{Locate, LocateEntry, LocateGroup, Locator, Location};
     ///
-    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
-    /// let mut locator = Locator::default();
-    /// let loc = Location {
-    ///     file_path: located.location(&located.ident).file_path,
-    ///     start: 0,
-    ///     end: 0,
-    /// };
-    /// (&located.struct_token, &located.ident).relocate_as_group(&mut locator, loc);
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
+    /// let loc = Location { start: 0, end: 0 };
+    /// (&syntax.struct_token, &syntax.ident).relocate_as_group(&mut locator, loc);
     /// ```
     fn relocate_as_group(&self, locator: &mut Locator, loc: Location);
 }
@@ -436,7 +398,6 @@ macro_rules! impl_locate_group {
                 fn locate_as_group(
                     &self,
                     locator: &mut Locator,
-                    file_path: FilePath,
                     code: &str,
                     offset: usize
                 ) -> Location
@@ -446,7 +407,7 @@ macro_rules! impl_locate_group {
                     // Locates children and tracks the group's end.
                     let mut end = offset;
                     $(
-                        let [<loc $i>] = [<this $i>].locate(locator, file_path, code, end);
+                        let [<loc $i>] = [<this $i>].locate(locator, code, end);
                         if [<loc $i>].start < [<loc $i>].end {
                             end = end.max( [<loc $i>].end );
                         }
@@ -468,7 +429,6 @@ macro_rules! impl_locate_group {
                     $(
                         if [<loc $ri>].start >= [<loc $ri>].end {
                             [<this $ri>].relocate(locator, Location {
-                                file_path,
                                 start: cur,
                                 end: cur
                             });
@@ -478,7 +438,6 @@ macro_rules! impl_locate_group {
                     )*
 
                     Location {
-                        file_path,
                         start,
                         end
                     }
@@ -498,15 +457,8 @@ macro_rules! impl_locate_group {
 }
 
 impl LocateGroup for () {
-    fn locate_as_group(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        _code: &str,
-        offset: usize,
-    ) -> Location {
+    fn locate_as_group(&self, _locator: &mut Locator, _code: &str, offset: usize) -> Location {
         Location {
-            file_path,
             start: offset,
             end: offset,
         }
@@ -516,14 +468,8 @@ impl LocateGroup for () {
 }
 
 impl<T: Locate> LocateGroup for &T {
-    fn locate_as_group(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.locate(locator, file_path, code, offset)
+    fn locate_as_group(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.locate(locator, code, offset)
     }
 
     fn relocate_as_group(&self, locator: &mut Locator, loc: Location) {
@@ -569,36 +515,28 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use syn_locator::{Locate, Locator, Surround};
+    /// use syn_locator::{Locate, LocateEntry, Locator, Surround};
     ///
-    /// let located = syn_locator::locate::<syn::Block>("block.rs", "{ value }").unwrap();
+    /// let code = "{ value }";
+    /// let syntax = syn::parse_str::<syn::Block>(code).unwrap();
+    /// let mut locator = Locator::new("block.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
     /// let helper = Surround {
     ///     front: (),
-    ///     surround: &located.brace_token,
-    ///     inner: &located.stmts,
+    ///     surround: &syntax.brace_token,
+    ///     inner: &syntax.stmts,
     ///     back: (),
     /// };
-    /// let mut locator = Locator::default();
-    /// let loc = helper.locate(&mut locator, located.location(&located.brace_token).file_path, "{ value }", 0);
+    /// let loc = helper.locate(&mut locator, code, 0);
     /// assert_eq!(loc.start, 0);
     /// ```
-    pub fn locate(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    pub fn locate(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         // Locate the surrounding token and fields.
-        let front_loc = self.front.locate_as_group(locator, file_path, code, offset);
-        let surround_loc = self
-            .surround
-            .locate(locator, file_path, code, front_loc.end);
+        let front_loc = self.front.locate_as_group(locator, code, offset);
+        let surround_loc = self.surround.locate(locator, code, front_loc.end);
         self.inner
-            .locate_as_group(locator, file_path, code, surround_loc.start + 1);
-        let back_loc = self
-            .back
-            .locate_as_group(locator, file_path, code, surround_loc.end);
+            .locate_as_group(locator, code, surround_loc.start + 1);
+        let back_loc = self.back.locate_as_group(locator, code, surround_loc.end);
 
         // Move an empty front group to the surrounding token.
         let mut start = front_loc.start;
@@ -606,7 +544,6 @@ where
             self.front.relocate_as_group(
                 locator,
                 Location {
-                    file_path,
                     start: surround_loc.start,
                     end: surround_loc.start,
                 },
@@ -620,7 +557,6 @@ where
             self.back.relocate_as_group(
                 locator,
                 Location {
-                    file_path,
                     start: surround_loc.end,
                     end: surround_loc.end,
                 },
@@ -628,11 +564,7 @@ where
             end = surround_loc.end;
         }
 
-        Location {
-            file_path,
-            start,
-            end,
-        }
+        Location { start, end }
     }
 }
 
@@ -658,44 +590,33 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use syn_locator::{Locate, Locator, Qualified};
+    /// use syn_locator::{Locate, LocateEntry, Locator, Qualified};
     ///
-    /// let located = syn_locator::locate::<syn::ItemType>(
-    ///     "qualified.rs",
-    ///     "type Assoc = <T as Trait>::Item;",
-    /// ).unwrap();
-    /// let syn::Type::Path(type_path) = located.ty.as_ref() else {
+    /// let code = "type Assoc = <T as Trait>::Item;";
+    /// let syntax = syn::parse_str::<syn::ItemType>(code).unwrap();
+    /// let mut locator = Locator::new("qualified.rs", code);
+    /// syntax.locate_as_entry(&mut locator).unwrap();
+    /// let syn::Type::Path(type_path) = syntax.ty.as_ref() else {
     ///     unreachable!()
     /// };
     /// let qself = type_path.qself.as_ref().unwrap();
     /// let helper = Qualified { front: (), qself, path: &type_path.path, back: () };
     ///
-    /// let mut locator = Locator::default();
-    /// let loc = helper.locate(&mut locator, located.location(qself).file_path, "type Assoc = <T as Trait>::Item;", 13);
+    /// let loc = helper.locate(&mut locator, code, 13);
     /// assert_eq!(loc.start, 13);
     /// ```
-    pub fn locate(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    pub fn locate(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         // Locate the qualified self type and path.
-        let front_loc = self.front.locate_as_group(locator, file_path, code, offset);
+        let front_loc = self.front.locate_as_group(locator, code, offset);
 
-        let qself_loc = self.qself.locate(locator, file_path, code, front_loc.end);
+        let qself_loc = self.qself.locate(locator, code, front_loc.end);
         let qself_mid_loc = self.qself.as_token._location(locator);
 
         // The path search starts in text like `a::b::Trait>::Assoc`. The extra `>` is fine
         // because string matching skips over it.
-        let path_loc = self
-            .path
-            .locate(locator, file_path, code, qself_mid_loc.end);
+        let path_loc = self.path.locate(locator, code, qself_mid_loc.end);
 
-        let back_loc = self
-            .back
-            .locate_as_group(locator, file_path, code, path_loc.end);
+        let back_loc = self.back.locate_as_group(locator, code, path_loc.end);
 
         // Move an empty front group to the qualified self type.
         let mut start = front_loc.start;
@@ -703,7 +624,6 @@ where
             self.front.relocate_as_group(
                 locator,
                 Location {
-                    file_path,
                     start: qself_loc.start,
                     end: qself_loc.start,
                 },
@@ -717,7 +637,6 @@ where
             self.back.relocate_as_group(
                 locator,
                 Location {
-                    file_path,
                     start: path_loc.end,
                     end: path_loc.end,
                 },
@@ -725,59 +644,59 @@ where
             end = path_loc.end;
         }
 
-        Location {
-            file_path,
-            start,
-            end,
-        }
+        Location { start, end }
     }
 }
 
-/// Storage for source files and syntax-node locations.
+/// Storage for one source file and its syntax-node locations.
 ///
 /// Most users do not need this type directly because [`Located`] owns one internally.
-#[derive(Default)]
 pub struct Locator {
-    files: Map<FilePath, Content>,
+    file_path: String,
+    content: Content,
     map: Map<LocationKey, Location>,
 }
 
 impl Locator {
-    fn contains_file<Q>(&self, file_path: &Q) -> bool
-    where
-        for<'a> Interned<'a, str>: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.files.contains_key(file_path)
+    /// Creates a locator for one source file.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use syn_locator::{Locate, LocateEntry, Locator};
+    ///
+    /// let code = "struct Foo;";
+    /// let syntax = syn::parse_str::<syn::ItemStruct>(code).unwrap();
+    /// let mut locator = Locator::new("file.rs", code);
+    ///
+    /// syntax.locate_as_entry(&mut locator).unwrap();
+    ///
+    /// assert_eq!(syntax.ident.code(&locator), "Foo");
+    /// ```
+    pub fn new(file_path: &str, code: impl Into<Box<str>>) -> Self {
+        let code = code.into();
+        Self {
+            file_path: file_path.to_owned(),
+            content: Content::new(code),
+            map: Map::default(),
+        }
     }
 
-    /// Inserts a file and returns its full-file location.
-    fn insert_file<T: Any + ?Sized>(
-        &mut self,
-        syn_file: &T,
-        file_path: &str,
-        code: Arc<str>,
-    ) -> Result<Location> {
-        let key = LocationKey::new(syn_file);
-        if let Some(loc) = self.map.get(&key) {
-            return Ok(*loc);
-        }
-        if self.contains_file(file_path) {
-            return Err(
-                format!("`syn-locator` detected duplicate file path: `{file_path}`").into(),
-            );
-        }
+    /// Returns the file path associated with this locator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let located = syn_locator::locate::<syn::ItemStruct>("file.rs", "struct Foo;").unwrap();
+    ///
+    /// assert_eq!(located.locator().file_path(), "file.rs");
+    /// ```
+    pub fn file_path(&self) -> &str {
+        &self.file_path
+    }
 
-        let file_path = intern_str(file_path);
-        let loc = Location {
-            file_path,
-            start: 0,
-            end: code.len(),
-        };
-        self.files.insert(file_path, Content::new(code));
-        self.map.insert(key, loc);
-
-        Ok(loc)
+    fn location(&self, start: usize, end: usize) -> Location {
+        Location { start, end }
     }
 
     fn set_location<T: Any + ?Sized>(&mut self, syn_node: &T, loc: Location) {
@@ -788,44 +707,25 @@ impl Locator {
         self.map.get(&LocationKey::new(syn_node)).cloned()
     }
 
-    fn get_original_code<Q>(&self, file_path: &Q) -> Option<&str>
-    where
-        FilePath: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.files
-            .get(file_path)
-            .map(|file| (*file.original_code).as_ref())
+    fn get_original_code(&self) -> &str {
+        &self.content.original_code
     }
 
-    fn filtered_code_ptr<Q>(&self, file_path: &Q) -> Option<*const str>
-    where
-        FilePath: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.files.get(file_path).map(|file| {
-            let code: &str = &file.filtered_code;
-            code as *const str
-        })
+    fn filtered_code_ptr(&self) -> *const str {
+        let code: &str = &self.content.filtered_code;
+        code as *const str
     }
-}
-
-/// Interns a string in a global and permanent interner.
-fn intern_str(s: &str) -> Interned<'static, str> {
-    /// Permanent string interner.
-    static STR_INTERNER: Lazy<DroplessInterner> = Lazy::new(DroplessInterner::new);
-    STR_INTERNER.intern(s)
 }
 
 struct Content {
-    original_code: Arc<str>,
-    filtered_code: Arc<str>,
+    original_code: Box<str>,
+    filtered_code: Box<str>,
 }
 
 impl Content {
-    fn new(code: Arc<str>) -> Self {
+    fn new(code: Box<str>) -> Self {
         let filtered_code = Self::remove_non_tokens((*code).as_ref());
-        let filtered_code: Arc<str> = filtered_code.into();
+        let filtered_code: Box<str> = filtered_code.into();
 
         Self {
             original_code: code,
@@ -875,15 +775,9 @@ impl LocationKey {
     }
 }
 
-/// File path interned in the crate's static string interner.
-pub type FilePath = Interned<'static, str>;
-
-/// Byte range for a syntax node in a source file.
+/// Byte range for a syntax node in the locator's source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Location {
-    /// File path associated with this location.
-    pub file_path: FilePath,
-
     /// Byte index into the code.
     pub start: usize,
 
@@ -894,27 +788,15 @@ pub struct Location {
 macro_rules! impl_locate_for_token {
     ($ty:ty, $token:literal, char) => {
         impl Locate for $ty {
-            fn find_loc(
-                &self,
-                _: &mut Locator,
-                file_path: FilePath,
-                code: &str,
-                offset: usize,
-            ) -> Location {
-                helper::char_location(file_path, code, offset, $token)
+            fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
+                helper::char_location(code, offset, $token)
             }
         }
     };
     ($ty:ty, $token:literal, str) => {
         impl Locate for $ty {
-            fn find_loc(
-                &self,
-                _: &mut Locator,
-                file_path: FilePath,
-                code: &str,
-                offset: usize,
-            ) -> Location {
-                helper::str_location(file_path, code, offset, $token)
+            fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
+                helper::str_location(code, offset, $token)
             }
         }
     };
@@ -1022,15 +904,8 @@ impl_locate_for_token!(syn::Token![~], '~', char);
 impl_locate_for_token!(syn::Token![_], '_', char);
 
 impl Locate for syn::token::Group {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        _code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, _code: &str, offset: usize) -> Location {
         Location {
-            file_path,
             start: offset,
             end: offset,
         }
@@ -1040,13 +915,7 @@ impl Locate for syn::token::Group {
 macro_rules! impl_locate_for_pair_tokens {
     ($ty:ty, $open:literal, $close:literal) => {
         impl Locate for $ty {
-            fn find_loc(
-                &self,
-                _: &mut Locator,
-                file_path: FilePath,
-                code: &str,
-                offset: usize,
-            ) -> Location {
+            fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
                 const OPEN: char = $open;
                 const CLOSE: char = $close;
 
@@ -1079,11 +948,7 @@ macro_rules! impl_locate_for_pair_tokens {
                     panic!("expected `{OPEN}..{CLOSE}` from {cur_code}");
                 }
 
-                Location {
-                    file_path,
-                    start,
-                    end,
-                }
+                Location { start, end }
             }
         }
     };
@@ -1094,43 +959,25 @@ impl_locate_for_pair_tokens!(syn::token::Bracket, '[', ']');
 impl_locate_for_pair_tokens!(syn::token::Paren, '(', ')');
 
 impl Locate for syn::Abi {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.extern_token, &self.name).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.extern_token, &self.name).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::AngleBracketedGenericArguments {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.colon2_token,
             &self.lt_token,
             &self.args,
             &self.gt_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Arm {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((if_token, guard)) = &self.guard {
             (
                 &self.attrs,
@@ -1141,7 +988,7 @@ impl Locate for syn::Arm {
                 &self.body,
                 &self.comma,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (
                 &self.attrs,
@@ -1150,147 +997,102 @@ impl Locate for syn::Arm {
                 &self.body,
                 &self.comma,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::AssocConst {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.ident, &self.generics, &self.eq_token, &self.value)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::AssocType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.ident, &self.generics, &self.eq_token, &self.ty)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Attribute {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.pound_token, &self.style),
             surround: &self.bracket_token,
             inner: &self.meta,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::AttrStyle {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
             Self::Outer => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::Inner(v) => v.find_loc(locator, file_path, code, offset),
+            Self::Inner(v) => v.find_loc(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::BareFnArg {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((name, colon_token)) = &self.name {
-            (&self.attrs, name, colon_token, &self.ty)
-                .locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, name, colon_token, &self.ty).locate_as_group(locator, code, offset)
         } else {
-            (&self.attrs, &self.ty).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.ty).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::BareVariadic {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((name, colon_token)) = &self.name {
             (&self.attrs, name, colon_token, &self.dots, &self.comma)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
-            (&self.attrs, &self.dots, &self.comma).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.dots, &self.comma).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::BinOp {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Add(v) => v.locate(locator, file_path, code, offset),
-            Self::Sub(v) => v.locate(locator, file_path, code, offset),
-            Self::Mul(v) => v.locate(locator, file_path, code, offset),
-            Self::Div(v) => v.locate(locator, file_path, code, offset),
-            Self::Rem(v) => v.locate(locator, file_path, code, offset),
-            Self::And(v) => v.locate(locator, file_path, code, offset),
-            Self::Or(v) => v.locate(locator, file_path, code, offset),
-            Self::BitXor(v) => v.locate(locator, file_path, code, offset),
-            Self::BitAnd(v) => v.locate(locator, file_path, code, offset),
-            Self::BitOr(v) => v.locate(locator, file_path, code, offset),
-            Self::Shl(v) => v.locate(locator, file_path, code, offset),
-            Self::Shr(v) => v.locate(locator, file_path, code, offset),
-            Self::Eq(v) => v.locate(locator, file_path, code, offset),
-            Self::Lt(v) => v.locate(locator, file_path, code, offset),
-            Self::Le(v) => v.locate(locator, file_path, code, offset),
-            Self::Ne(v) => v.locate(locator, file_path, code, offset),
-            Self::Ge(v) => v.locate(locator, file_path, code, offset),
-            Self::Gt(v) => v.locate(locator, file_path, code, offset),
-            Self::AddAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::SubAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::MulAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::DivAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::RemAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::BitXorAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::BitAndAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::BitOrAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::ShlAssign(v) => v.locate(locator, file_path, code, offset),
-            Self::ShrAssign(v) => v.locate(locator, file_path, code, offset),
+            Self::Add(v) => v.locate(locator, code, offset),
+            Self::Sub(v) => v.locate(locator, code, offset),
+            Self::Mul(v) => v.locate(locator, code, offset),
+            Self::Div(v) => v.locate(locator, code, offset),
+            Self::Rem(v) => v.locate(locator, code, offset),
+            Self::And(v) => v.locate(locator, code, offset),
+            Self::Or(v) => v.locate(locator, code, offset),
+            Self::BitXor(v) => v.locate(locator, code, offset),
+            Self::BitAnd(v) => v.locate(locator, code, offset),
+            Self::BitOr(v) => v.locate(locator, code, offset),
+            Self::Shl(v) => v.locate(locator, code, offset),
+            Self::Shr(v) => v.locate(locator, code, offset),
+            Self::Eq(v) => v.locate(locator, code, offset),
+            Self::Lt(v) => v.locate(locator, code, offset),
+            Self::Le(v) => v.locate(locator, code, offset),
+            Self::Ne(v) => v.locate(locator, code, offset),
+            Self::Ge(v) => v.locate(locator, code, offset),
+            Self::Gt(v) => v.locate(locator, code, offset),
+            Self::AddAssign(v) => v.locate(locator, code, offset),
+            Self::SubAssign(v) => v.locate(locator, code, offset),
+            Self::MulAssign(v) => v.locate(locator, code, offset),
+            Self::DivAssign(v) => v.locate(locator, code, offset),
+            Self::RemAssign(v) => v.locate(locator, code, offset),
+            Self::BitXorAssign(v) => v.locate(locator, code, offset),
+            Self::BitAndAssign(v) => v.locate(locator, code, offset),
+            Self::BitOrAssign(v) => v.locate(locator, code, offset),
+            Self::ShlAssign(v) => v.locate(locator, code, offset),
+            Self::ShrAssign(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -1299,54 +1101,35 @@ impl Locate for syn::BinOp {
 }
 
 impl Locate for syn::Block {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.brace_token,
             inner: &self.stmts,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::BoundLifetimes {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.for_token,
             &self.lt_token,
             &self.lifetimes,
             &self.gt_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::CapturedParam {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Lifetime(v) => v.locate(locator, file_path, code, offset),
-            Self::Ident(v) => v.locate(locator, file_path, code, offset),
+            Self::Lifetime(v) => v.locate(locator, code, offset),
+            Self::Ident(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -1355,13 +1138,7 @@ impl Locate for syn::CapturedParam {
 }
 
 impl Locate for syn::ConstParam {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.const_token,
@@ -1371,78 +1148,64 @@ impl Locate for syn::ConstParam {
             &self.eq_token,
             &self.default,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Constraint {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.ident, &self.generics, &self.colon_token, &self.bounds)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Expr {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Array(v) => v.locate(locator, file_path, code, offset),
-            Self::Assign(v) => v.locate(locator, file_path, code, offset),
-            Self::Async(v) => v.locate(locator, file_path, code, offset),
-            Self::Await(v) => v.locate(locator, file_path, code, offset),
-            Self::Binary(v) => v.locate(locator, file_path, code, offset),
-            Self::Block(v) => v.locate(locator, file_path, code, offset),
-            Self::Break(v) => v.locate(locator, file_path, code, offset),
-            Self::Call(v) => v.locate(locator, file_path, code, offset),
-            Self::Cast(v) => v.locate(locator, file_path, code, offset),
-            Self::Closure(v) => v.locate(locator, file_path, code, offset),
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Continue(v) => v.locate(locator, file_path, code, offset),
-            Self::Field(v) => v.locate(locator, file_path, code, offset),
-            Self::ForLoop(v) => v.locate(locator, file_path, code, offset),
-            Self::Group(v) => v.locate(locator, file_path, code, offset),
-            Self::If(v) => v.locate(locator, file_path, code, offset),
-            Self::Index(v) => v.locate(locator, file_path, code, offset),
-            Self::Infer(v) => v.locate(locator, file_path, code, offset),
-            Self::Let(v) => v.locate(locator, file_path, code, offset),
-            Self::Lit(v) => v.locate(locator, file_path, code, offset),
-            Self::Loop(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
-            Self::Match(v) => v.locate(locator, file_path, code, offset),
-            Self::MethodCall(v) => v.locate(locator, file_path, code, offset),
-            Self::Paren(v) => v.locate(locator, file_path, code, offset),
-            Self::Path(v) => v.locate(locator, file_path, code, offset),
-            Self::Range(v) => v.locate(locator, file_path, code, offset),
-            Self::RawAddr(v) => v.locate(locator, file_path, code, offset),
-            Self::Reference(v) => v.locate(locator, file_path, code, offset),
-            Self::Repeat(v) => v.locate(locator, file_path, code, offset),
-            Self::Return(v) => v.locate(locator, file_path, code, offset),
-            Self::Struct(v) => v.locate(locator, file_path, code, offset),
-            Self::Try(v) => v.locate(locator, file_path, code, offset),
-            Self::TryBlock(v) => v.locate(locator, file_path, code, offset),
-            Self::Tuple(v) => v.locate(locator, file_path, code, offset),
-            Self::Unary(v) => v.locate(locator, file_path, code, offset),
-            Self::Unsafe(v) => v.locate(locator, file_path, code, offset),
+            Self::Array(v) => v.locate(locator, code, offset),
+            Self::Assign(v) => v.locate(locator, code, offset),
+            Self::Async(v) => v.locate(locator, code, offset),
+            Self::Await(v) => v.locate(locator, code, offset),
+            Self::Binary(v) => v.locate(locator, code, offset),
+            Self::Block(v) => v.locate(locator, code, offset),
+            Self::Break(v) => v.locate(locator, code, offset),
+            Self::Call(v) => v.locate(locator, code, offset),
+            Self::Cast(v) => v.locate(locator, code, offset),
+            Self::Closure(v) => v.locate(locator, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Continue(v) => v.locate(locator, code, offset),
+            Self::Field(v) => v.locate(locator, code, offset),
+            Self::ForLoop(v) => v.locate(locator, code, offset),
+            Self::Group(v) => v.locate(locator, code, offset),
+            Self::If(v) => v.locate(locator, code, offset),
+            Self::Index(v) => v.locate(locator, code, offset),
+            Self::Infer(v) => v.locate(locator, code, offset),
+            Self::Let(v) => v.locate(locator, code, offset),
+            Self::Lit(v) => v.locate(locator, code, offset),
+            Self::Loop(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
+            Self::Match(v) => v.locate(locator, code, offset),
+            Self::MethodCall(v) => v.locate(locator, code, offset),
+            Self::Paren(v) => v.locate(locator, code, offset),
+            Self::Path(v) => v.locate(locator, code, offset),
+            Self::Range(v) => v.locate(locator, code, offset),
+            Self::RawAddr(v) => v.locate(locator, code, offset),
+            Self::Reference(v) => v.locate(locator, code, offset),
+            Self::Repeat(v) => v.locate(locator, code, offset),
+            Self::Return(v) => v.locate(locator, code, offset),
+            Self::Struct(v) => v.locate(locator, code, offset),
+            Self::Try(v) => v.locate(locator, code, offset),
+            Self::TryBlock(v) => v.locate(locator, code, offset),
+            Self::Tuple(v) => v.locate(locator, code, offset),
+            Self::Unary(v) => v.locate(locator, code, offset),
+            Self::Unsafe(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::While(v) => v.locate(locator, file_path, code, offset),
-            Self::Yield(v) => v.locate(locator, file_path, code, offset),
+            Self::While(v) => v.locate(locator, code, offset),
+            Self::Yield(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -1451,139 +1214,77 @@ impl Locate for syn::Expr {
 }
 
 impl Locate for syn::ExprArray {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.bracket_token,
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprAssign {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.left, &self.eq_token, &self.right)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprAsync {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.async_token, &self.capture, &self.block)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprAwait {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.base, &self.dot_token, &self.await_token)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprBinary {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.left, &self.op, &self.right)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.left, &self.op, &self.right).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprBlock {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.label, &self.block).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.label, &self.block).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprBreak {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.break_token, &self.label, &self.expr)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprCall {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.attrs, &self.func),
             surround: &self.paren_token,
             inner: &self.args,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprCast {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.expr, &self.as_token, &self.ty)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.expr, &self.as_token, &self.ty).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprClosure {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.lifetimes,
@@ -1597,57 +1298,31 @@ impl Locate for syn::ExprClosure {
             &self.output,
             &self.body,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprConst {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.const_token, &self.block)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.const_token, &self.block).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprContinue {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.continue_token, &self.label)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.continue_token, &self.label).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprField {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.base, &self.dot_token, &self.member)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprForLoop {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.label,
@@ -1657,31 +1332,18 @@ impl Locate for syn::ExprForLoop {
             &self.expr,
             &self.body,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprGroup {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.group_token, &self.expr)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.group_token, &self.expr).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprIf {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((else_token, else_branch)) = &self.else_branch {
             (
                 &self.attrs,
@@ -1691,52 +1353,34 @@ impl Locate for syn::ExprIf {
                 else_token,
                 else_branch,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (&self.attrs, &self.if_token, &self.cond, &self.then_branch)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::ExprIndex {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.attrs, &self.expr),
             surround: &self.bracket_token,
             inner: &self.index,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprInfer {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.underscore_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.underscore_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprLet {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.let_token,
@@ -1744,73 +1388,43 @@ impl Locate for syn::ExprLet {
             &self.eq_token,
             &self.expr,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprLit {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.lit).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.lit).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprLoop {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.label, &self.loop_token, &self.body)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.mac).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.mac).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprMatch {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.attrs, &self.match_token, &self.expr),
             surround: &self.brace_token,
             inner: &self.arms,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprMethodCall {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (
                 &self.attrs,
@@ -1823,36 +1437,24 @@ impl Locate for syn::ExprMethodCall {
             inner: &self.args,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprParen {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.paren_token,
             inner: &self.expr,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprPath {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some(qself) = &self.qself {
             Qualified {
                 front: &self.attrs,
@@ -1860,45 +1462,32 @@ impl Locate for syn::ExprPath {
                 path: &self.path,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
-            (&self.attrs, &self.path).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.path).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::ExprRange {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match (&self.start, &self.end) {
-            (Some(start), Some(end)) => (&self.attrs, start, &self.limits, end)
-                .locate_as_group(locator, file_path, code, offset),
+            (Some(start), Some(end)) => {
+                (&self.attrs, start, &self.limits, end).locate_as_group(locator, code, offset)
+            }
             (Some(start), None) => {
-                (&self.attrs, start, &self.limits).locate_as_group(locator, file_path, code, offset)
+                (&self.attrs, start, &self.limits).locate_as_group(locator, code, offset)
             }
             (None, Some(end)) => {
-                (&self.attrs, &self.limits, end).locate_as_group(locator, file_path, code, offset)
+                (&self.attrs, &self.limits, end).locate_as_group(locator, code, offset)
             }
-            (None, None) => {
-                (&self.attrs, &self.limits).locate_as_group(locator, file_path, code, offset)
-            }
+            (None, None) => (&self.attrs, &self.limits).locate_as_group(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::ExprRawAddr {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.and_token,
@@ -1906,62 +1495,37 @@ impl Locate for syn::ExprRawAddr {
             &self.mutability,
             &self.expr,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprReference {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.and_token, &self.mutability, &self.expr)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprRepeat {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.bracket_token,
             inner: (&self.expr, &self.semi_token, &self.len),
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprReturn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.return_token, &self.expr)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.return_token, &self.expr).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprStruct {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let front_loc = if let Some(qself) = &self.qself {
             Qualified {
                 front: &self.attrs,
@@ -1969,9 +1533,9 @@ impl Locate for syn::ExprStruct {
                 path: &self.path,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
-            (&self.attrs, &self.path).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.path).locate_as_group(locator, code, offset)
         };
 
         let back_loc = Surround {
@@ -1980,10 +1544,9 @@ impl Locate for syn::ExprStruct {
             inner: (&self.fields, &self.dot2_token, &self.rest),
             back: (),
         }
-        .locate(locator, file_path, code, front_loc.end);
+        .locate(locator, code, front_loc.end);
 
         Location {
-            file_path,
             start: front_loc.start,
             end: back_loc.end,
         }
@@ -1991,82 +1554,43 @@ impl Locate for syn::ExprStruct {
 }
 
 impl Locate for syn::ExprTry {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.expr, &self.question_token)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.expr, &self.question_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprTryBlock {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.try_token, &self.block)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.try_token, &self.block).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprTuple {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.paren_token,
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprUnary {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.op, &self.expr).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.op, &self.expr).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprUnsafe {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.unsafe_token, &self.block)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.unsafe_token, &self.block).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprWhile {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.label,
@@ -2074,31 +1598,18 @@ impl Locate for syn::ExprWhile {
             &self.cond,
             &self.body,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ExprYield {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.yield_token, &self.expr)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.yield_token, &self.expr).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Field {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2107,20 +1618,13 @@ impl Locate for syn::Field {
             &self.colon_token,
             &self.ty,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::FieldMutability {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        _code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, _code: &str, offset: usize) -> Location {
         Location {
-            file_path,
             start: offset,
             end: offset,
         }
@@ -2131,39 +1635,26 @@ impl Locate for syn::FieldMutability {
 // from `member`, so `pat` does not have its own source span.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/pat.rs#L562-L594
 impl Locate for syn::FieldPat {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if self.colon_token.is_some() || !matches!(self.member, syn::Member::Named(_)) {
             (&self.attrs, &self.member, &self.colon_token, &self.pat)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
-            let loc = (&self.attrs, &self.colon_token, &self.pat)
-                .locate_as_group(locator, file_path, code, offset);
+            let loc =
+                (&self.attrs, &self.colon_token, &self.pat).locate_as_group(locator, code, offset);
             self.member
-                .locate(locator, file_path, code, self.attrs._location(locator).end);
+                .locate(locator, code, self.attrs._location(locator).end);
             loc
         }
     }
 }
 
 impl Locate for syn::Fields {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Named(v) => v.locate(locator, file_path, code, offset),
-            Self::Unnamed(v) => v.locate(locator, file_path, code, offset),
+            Self::Named(v) => v.locate(locator, code, offset),
+            Self::Unnamed(v) => v.locate(locator, code, offset),
             Self::Unit => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -2172,38 +1663,26 @@ impl Locate for syn::Fields {
 }
 
 impl Locate for syn::FieldsNamed {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.brace_token,
             inner: &self.named,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::FieldsUnnamed {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.paren_token,
             inner: &self.unnamed,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
@@ -2211,73 +1690,47 @@ impl Locate for syn::FieldsUnnamed {
 // from `member`, so `expr` does not have its own source span.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/expr.rs#L2744-L2755
 impl Locate for syn::FieldValue {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if self.colon_token.is_some() || !matches!(self.member, syn::Member::Named(_)) {
             (&self.attrs, &self.member, &self.colon_token, &self.expr)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             let loc = (&self.attrs, &self.member, &self.colon_token)
-                .locate_as_group(locator, file_path, code, offset);
+                .locate_as_group(locator, code, offset);
             self.expr
-                .locate(locator, file_path, code, self.attrs._location(locator).end);
+                .locate(locator, code, self.attrs._location(locator).end);
             loc
         }
     }
 }
 
 impl Locate for syn::File {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.items).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.items).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::FnArg {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Receiver(v) => v.locate(locator, file_path, code, offset),
-            Self::Typed(v) => v.locate(locator, file_path, code, offset),
+            Self::Receiver(v) => v.locate(locator, code, offset),
+            Self::Typed(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::ForeignItem {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Fn(v) => v.locate(locator, file_path, code, offset),
-            Self::Static(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
+            Self::Fn(v) => v.locate(locator, code, offset),
+            Self::Static(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -2286,26 +1739,13 @@ impl Locate for syn::ForeignItem {
 }
 
 impl Locate for syn::ForeignItemFn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.vis, &self.sig, &self.semi_token)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.vis, &self.sig, &self.semi_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ForeignItemStatic {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2316,18 +1756,12 @@ impl Locate for syn::ForeignItemStatic {
             &self.ty,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ForeignItemType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2336,39 +1770,26 @@ impl Locate for syn::ForeignItemType {
             &self.generics,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ForeignItemMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::GenericArgument {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Lifetime(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::AssocType(v) => v.locate(locator, file_path, code, offset),
-            Self::AssocConst(v) => v.locate(locator, file_path, code, offset),
-            Self::Constraint(v) => v.locate(locator, file_path, code, offset),
+            Self::Lifetime(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::AssocType(v) => v.locate(locator, code, offset),
+            Self::AssocConst(v) => v.locate(locator, code, offset),
+            Self::Constraint(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -2377,47 +1798,29 @@ impl Locate for syn::GenericArgument {
 }
 
 impl Locate for syn::GenericParam {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Lifetime(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
+            Self::Lifetime(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Generics {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.lt_token,
             &self.params,
             &self.gt_token,
             &self.where_clause,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Ident {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let cur_code = &code[offset..];
 
         let ident = self.to_string();
@@ -2427,7 +1830,6 @@ impl Locate for syn::Ident {
                 .unwrap_or_else(|| panic!("expected `{ident}` from `{cur_code}`"));
 
         Location {
-            file_path,
             start,
             end: start + ident.len(),
         }
@@ -2435,25 +1837,17 @@ impl Locate for syn::Ident {
 }
 
 impl Locate for syn::ImplItem {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Fn(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Fn(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -2462,13 +1856,7 @@ impl Locate for syn::ImplItem {
 }
 
 impl Locate for syn::ImplItemConst {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2482,18 +1870,12 @@ impl Locate for syn::ImplItemConst {
             &self.expr,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ImplItemFn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2501,18 +1883,12 @@ impl Locate for syn::ImplItemFn {
             &self.sig,
             &self.block,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ImplItemType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2524,32 +1900,19 @@ impl Locate for syn::ImplItemType {
             &self.ty,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ImplItemMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ImplRestriction {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        _code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, _code: &str, offset: usize) -> Location {
         Location {
-            file_path,
             start: offset,
             end: offset,
         }
@@ -2557,49 +1920,35 @@ impl Locate for syn::ImplRestriction {
 }
 
 impl Locate for syn::Index {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let value = self.index.to_string();
-        helper::str_location(file_path, code, offset, &value)
+        helper::str_location(code, offset, &value)
     }
 }
 
 impl Locate for syn::Item {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Enum(v) => v.locate(locator, file_path, code, offset),
-            Self::ExternCrate(v) => v.locate(locator, file_path, code, offset),
-            Self::Fn(v) => v.locate(locator, file_path, code, offset),
-            Self::ForeignMod(v) => v.locate(locator, file_path, code, offset),
-            Self::Impl(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
-            Self::Mod(v) => v.locate(locator, file_path, code, offset),
-            Self::Static(v) => v.locate(locator, file_path, code, offset),
-            Self::Struct(v) => v.locate(locator, file_path, code, offset),
-            Self::Trait(v) => v.locate(locator, file_path, code, offset),
-            Self::TraitAlias(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Union(v) => v.locate(locator, file_path, code, offset),
-            Self::Use(v) => v.locate(locator, file_path, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Enum(v) => v.locate(locator, code, offset),
+            Self::ExternCrate(v) => v.locate(locator, code, offset),
+            Self::Fn(v) => v.locate(locator, code, offset),
+            Self::ForeignMod(v) => v.locate(locator, code, offset),
+            Self::Impl(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
+            Self::Mod(v) => v.locate(locator, code, offset),
+            Self::Static(v) => v.locate(locator, code, offset),
+            Self::Struct(v) => v.locate(locator, code, offset),
+            Self::Trait(v) => v.locate(locator, code, offset),
+            Self::TraitAlias(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Union(v) => v.locate(locator, code, offset),
+            Self::Use(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -2608,13 +1957,7 @@ impl Locate for syn::Item {
 }
 
 impl Locate for syn::ItemConst {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2627,18 +1970,12 @@ impl Locate for syn::ItemConst {
             &self.expr,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemEnum {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (
                 &self.attrs,
@@ -2651,18 +1988,12 @@ impl Locate for syn::ItemEnum {
             inner: &self.variants,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemExternCrate {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((as_token, rename)) = &self.rename {
             (
                 &self.attrs,
@@ -2674,7 +2005,7 @@ impl Locate for syn::ItemExternCrate {
                 rename,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (
                 &self.attrs,
@@ -2684,50 +2015,31 @@ impl Locate for syn::ItemExternCrate {
                 &self.ident,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::ItemFn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.vis, &self.sig, &self.block)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.vis, &self.sig, &self.block).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemForeignMod {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.attrs, &self.unsafety, &self.abi),
             surround: &self.brace_token,
             inner: &self.items,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemImpl {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let loc = if let Some((exc_token, path, for_token)) = &self.trait_ {
             Surround {
                 front: (
@@ -2749,7 +2061,7 @@ impl Locate for syn::ItemImpl {
                 inner: &self.items,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
             Surround {
                 front: (
@@ -2768,10 +2080,10 @@ impl Locate for syn::ItemImpl {
                 inner: &self.items,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         };
 
-        locate_generics(locator, file_path, &self.generics);
+        locate_generics(locator, &self.generics);
         loc
     }
 }
@@ -2779,13 +2091,7 @@ impl Locate for syn::ItemImpl {
 // syn parses these fields in a different order from their struct declaration.
 // ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/item.rs#L1240
 impl Locate for syn::ItemMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (
                 &self.attrs,
@@ -2797,18 +2103,12 @@ impl Locate for syn::ItemMacro {
             inner: (), // Macro tokens are not processed yet.
             back: &self.semi_token,
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemMod {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match (&self.content, &self.semi) {
             (Some((brace, items)), Some(semi_token)) => Surround {
                 front: (&self.attrs, &self.vis, &self.mod_token, &self.ident),
@@ -2816,14 +2116,14 @@ impl Locate for syn::ItemMod {
                 inner: items,
                 back: semi_token,
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             (Some((brace, items)), None) => Surround {
                 front: (&self.attrs, &self.vis, &self.mod_token, &self.ident),
                 surround: brace,
                 inner: items,
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             (None, Some(semi_token)) => (
                 &self.attrs,
                 &self.vis,
@@ -2831,21 +2131,15 @@ impl Locate for syn::ItemMod {
                 &self.ident,
                 semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset),
+                .locate_as_group(locator, code, offset),
             (None, None) => (&self.attrs, &self.vis, &self.mod_token, &self.ident)
-                .locate_as_group(locator, file_path, code, offset),
+                .locate_as_group(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::ItemStatic {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2858,18 +2152,12 @@ impl Locate for syn::ItemStatic {
             &self.expr,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemStruct {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2879,18 +2167,12 @@ impl Locate for syn::ItemStruct {
             &self.fields,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemTrait {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (
                 &self.attrs,
@@ -2908,18 +2190,12 @@ impl Locate for syn::ItemTrait {
             inner: &self.items,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemTraitAlias {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2930,18 +2206,12 @@ impl Locate for syn::ItemTraitAlias {
             &self.bounds,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2952,18 +2222,12 @@ impl Locate for syn::ItemType {
             &self.ty,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemUnion {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2972,18 +2236,12 @@ impl Locate for syn::ItemUnion {
             &self.generics,
             &self.fields,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ItemUse {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.vis,
@@ -2992,83 +2250,53 @@ impl Locate for syn::ItemUse {
             &self.tree,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Label {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.name, &self.colon_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.name, &self.colon_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Lifetime {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let cur_code = &code[offset..];
 
         let start = offset
             + cur_code
                 .find('\'')
                 .unwrap_or_else(|| panic!("expected ' from {cur_code}"));
-        let end = self.ident.locate(locator, file_path, code, start + 1).end;
+        let end = self.ident.locate(locator, code, start + 1).end;
 
-        Location {
-            file_path,
-            start,
-            end,
-        }
+        Location { start, end }
     }
 }
 
 impl Locate for syn::LifetimeParam {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.lifetime, &self.colon_token, &self.bounds)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Lit {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Str(v) => v.locate(locator, file_path, code, offset),
-            Self::ByteStr(v) => v.locate(locator, file_path, code, offset),
-            Self::CStr(v) => v.locate(locator, file_path, code, offset),
-            Self::Byte(v) => v.locate(locator, file_path, code, offset),
-            Self::Char(v) => v.locate(locator, file_path, code, offset),
-            Self::Int(v) => v.locate(locator, file_path, code, offset),
-            Self::Float(v) => v.locate(locator, file_path, code, offset),
-            Self::Bool(v) => v.locate(locator, file_path, code, offset),
+            Self::Str(v) => v.locate(locator, code, offset),
+            Self::ByteStr(v) => v.locate(locator, code, offset),
+            Self::CStr(v) => v.locate(locator, code, offset),
+            Self::Byte(v) => v.locate(locator, code, offset),
+            Self::Char(v) => v.locate(locator, code, offset),
+            Self::Int(v) => v.locate(locator, code, offset),
+            Self::Float(v) => v.locate(locator, code, offset),
+            Self::Bool(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -3077,117 +2305,63 @@ impl Locate for syn::Lit {
 }
 
 impl Locate for syn::LitStr {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitByteStr {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitCStr {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitByte {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitChar {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitInt {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitFloat {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::LitBool {
-    fn find_loc(
-        &self,
-        _: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, _locator: &mut Locator, code: &str, offset: usize) -> Location {
         let lit = self.token().to_string();
-        helper::str_location(file_path, code, offset, &lit)
+        helper::str_location(code, offset, &lit)
     }
 }
 
 impl Locate for syn::Local {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.let_token,
@@ -3195,35 +2369,22 @@ impl Locate for syn::Local {
             &self.init,
             &self.semi_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::LocalInit {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((else_token, diverge)) = &self.diverge {
-            (&self.eq_token, &self.expr, else_token, diverge)
-                .locate_as_group(locator, file_path, code, offset)
+            (&self.eq_token, &self.expr, else_token, diverge).locate_as_group(locator, code, offset)
         } else {
-            (&self.eq_token, &self.expr).locate_as_group(locator, file_path, code, offset)
+            (&self.eq_token, &self.expr).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::Macro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match &self.delimiter {
             syn::MacroDelimiter::Paren(paren) => Surround {
                 front: (&self.path, &self.bang_token),
@@ -3231,80 +2392,56 @@ impl Locate for syn::Macro {
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             syn::MacroDelimiter::Brace(brace) => Surround {
                 front: (&self.path, &self.bang_token),
                 surround: brace,
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             syn::MacroDelimiter::Bracket(bracket) => Surround {
                 front: (&self.path, &self.bang_token),
                 surround: bracket,
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::MacroDelimiter {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Paren(v) => v.locate(locator, file_path, code, offset),
-            Self::Brace(v) => v.locate(locator, file_path, code, offset),
-            Self::Bracket(v) => v.locate(locator, file_path, code, offset),
+            Self::Paren(v) => v.locate(locator, code, offset),
+            Self::Brace(v) => v.locate(locator, code, offset),
+            Self::Bracket(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Member {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Named(v) => v.locate(locator, file_path, code, offset),
-            Self::Unnamed(v) => v.locate(locator, file_path, code, offset),
+            Self::Named(v) => v.locate(locator, code, offset),
+            Self::Unnamed(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Meta {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Path(v) => v.locate(locator, file_path, code, offset),
-            Self::List(v) => v.locate(locator, file_path, code, offset),
-            Self::NameValue(v) => v.locate(locator, file_path, code, offset),
+            Self::Path(v) => v.locate(locator, code, offset),
+            Self::List(v) => v.locate(locator, code, offset),
+            Self::NameValue(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::MetaList {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match &self.delimiter {
             syn::MacroDelimiter::Paren(paren) => Surround {
                 front: &self.path,
@@ -3312,87 +2449,67 @@ impl Locate for syn::MetaList {
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             syn::MacroDelimiter::Brace(brace) => Surround {
                 front: &self.path,
                 surround: brace,
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
             syn::MacroDelimiter::Bracket(bracket) => Surround {
                 front: &self.path,
                 surround: bracket,
                 inner: (),
                 back: (),
             }
-            .locate(locator, file_path, code, offset),
+            .locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::MetaNameValue {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.path, &self.eq_token, &self.value).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.path, &self.eq_token, &self.value).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::ParenthesizedGenericArguments {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.paren_token,
             inner: &self.inputs,
             back: &self.output,
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::Pat {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Ident(v) => v.locate(locator, file_path, code, offset),
-            Self::Lit(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
-            Self::Or(v) => v.locate(locator, file_path, code, offset),
-            Self::Paren(v) => v.locate(locator, file_path, code, offset),
-            Self::Path(v) => v.locate(locator, file_path, code, offset),
-            Self::Range(v) => v.locate(locator, file_path, code, offset),
-            Self::Reference(v) => v.locate(locator, file_path, code, offset),
-            Self::Rest(v) => v.locate(locator, file_path, code, offset),
-            Self::Slice(v) => v.locate(locator, file_path, code, offset),
-            Self::Struct(v) => v.locate(locator, file_path, code, offset),
-            Self::Tuple(v) => v.locate(locator, file_path, code, offset),
-            Self::TupleStruct(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Ident(v) => v.locate(locator, code, offset),
+            Self::Lit(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
+            Self::Or(v) => v.locate(locator, code, offset),
+            Self::Paren(v) => v.locate(locator, code, offset),
+            Self::Path(v) => v.locate(locator, code, offset),
+            Self::Range(v) => v.locate(locator, code, offset),
+            Self::Reference(v) => v.locate(locator, code, offset),
+            Self::Rest(v) => v.locate(locator, code, offset),
+            Self::Slice(v) => v.locate(locator, code, offset),
+            Self::Struct(v) => v.locate(locator, code, offset),
+            Self::Tuple(v) => v.locate(locator, code, offset),
+            Self::TupleStruct(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::Wild(v) => v.locate(locator, file_path, code, offset),
+            Self::Wild(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -3401,13 +2518,7 @@ impl Locate for syn::Pat {
 }
 
 impl Locate for syn::PatIdent {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((at_token, subpat)) = &self.subpat {
             (
                 &self.attrs,
@@ -3417,96 +2528,59 @@ impl Locate for syn::PatIdent {
                 at_token,
                 subpat,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (&self.attrs, &self.by_ref, &self.mutability, &self.ident)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::PatOr {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.leading_vert, &self.cases)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.leading_vert, &self.cases).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatParen {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.paren_token,
             inner: &self.pat,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatReference {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.and_token, &self.mutability, &self.pat)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatRest {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.dot2_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.dot2_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatSlice {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.bracket_token,
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatStruct {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let front_loc = if let Some(qself) = &self.qself {
             Qualified {
                 front: &self.attrs,
@@ -3514,9 +2588,9 @@ impl Locate for syn::PatStruct {
                 path: &self.path,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
-            (&self.attrs, &self.path).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.path).locate_as_group(locator, code, offset)
         };
 
         let back_loc = Surround {
@@ -3525,10 +2599,9 @@ impl Locate for syn::PatStruct {
             inner: (&self.fields, &self.rest),
             back: (),
         }
-        .locate(locator, file_path, code, front_loc.end);
+        .locate(locator, code, front_loc.end);
 
         Location {
-            file_path,
             start: front_loc.start,
             end: back_loc.end,
         }
@@ -3536,31 +2609,19 @@ impl Locate for syn::PatStruct {
 }
 
 impl Locate for syn::PatTuple {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.attrs,
             surround: &self.paren_token,
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatTupleStruct {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let front_loc = if let Some(qself) = &self.qself {
             Qualified {
                 front: &self.attrs,
@@ -3568,9 +2629,9 @@ impl Locate for syn::PatTupleStruct {
                 path: &self.path,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
-            (&self.attrs, &self.path).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.path).locate_as_group(locator, code, offset)
         };
 
         let back_loc = Surround {
@@ -3579,10 +2640,9 @@ impl Locate for syn::PatTupleStruct {
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, front_loc.end);
+        .locate(locator, code, front_loc.end);
 
         Location {
-            file_path,
             start: front_loc.start,
             end: back_loc.end,
         }
@@ -3590,148 +2650,85 @@ impl Locate for syn::PatTupleStruct {
 }
 
 impl Locate for syn::PatType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.pat, &self.colon_token, &self.ty)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.pat, &self.colon_token, &self.ty).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PatWild {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.underscore_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.underscore_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Path {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.leading_colon, &self.segments).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.leading_colon, &self.segments).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PathArguments {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
             Self::None => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::AngleBracketed(v) => v.locate(locator, file_path, code, offset),
-            Self::Parenthesized(v) => v.locate(locator, file_path, code, offset),
+            Self::AngleBracketed(v) => v.locate(locator, code, offset),
+            Self::Parenthesized(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::PathSegment {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.ident, &self.arguments).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.ident, &self.arguments).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PointerMutability {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Mut(v) => v.locate(locator, file_path, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Mut(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::PreciseCapture {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.use_token,
             &self.lt_token,
             &self.params,
             &self.gt_token,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PredicateLifetime {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.lifetime, &self.colon_token, &self.bounds)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.lifetime, &self.colon_token, &self.bounds).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::PredicateType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.lifetimes,
             &self.bounded_ty,
             &self.colon_token,
             &self.bounds,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::QSelf {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        let front_loc = (&self.lt_token, &self.ty, &self.as_token)
-            .locate_as_group(locator, file_path, code, offset);
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        let front_loc =
+            (&self.lt_token, &self.ty, &self.as_token).locate_as_group(locator, code, offset);
 
         const OPEN: char = '<';
         const CLOSE: char = '>';
@@ -3753,10 +2750,9 @@ impl Locate for syn::QSelf {
             cur += c.len_utf8();
         }
 
-        let end = self.gt_token.locate(locator, file_path, code, cur).end;
+        let end = self.gt_token.locate(locator, code, cur).end;
 
         Location {
-            file_path,
             start: front_loc.start,
             end,
         }
@@ -3764,28 +2760,16 @@ impl Locate for syn::QSelf {
 }
 
 impl Locate for syn::RangeLimits {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::HalfOpen(v) => v.locate(locator, file_path, code, offset),
-            Self::Closed(v) => v.locate(locator, file_path, code, offset),
+            Self::HalfOpen(v) => v.locate(locator, code, offset),
+            Self::Closed(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Receiver {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         // Without an explicit receiver type (`self: Type`), syn synthesizes `self.ty`.
 
         if let Some((and_token, reference)) = &self.reference {
@@ -3799,7 +2783,7 @@ impl Locate for syn::Receiver {
                     colon_token,
                     &self.ty,
                 )
-                    .locate_as_group(locator, file_path, code, offset)
+                    .locate_as_group(locator, code, offset)
             } else {
                 (
                     &self.attrs,
@@ -3808,7 +2792,7 @@ impl Locate for syn::Receiver {
                     &self.mutability,
                     &self.self_token,
                 )
-                    .locate_as_group(locator, file_path, code, offset)
+                    .locate_as_group(locator, code, offset)
             }
         } else if let Some(colon_token) = &self.colon_token {
             (
@@ -3818,43 +2802,27 @@ impl Locate for syn::Receiver {
                 colon_token,
                 &self.ty,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
-            (&self.attrs, &self.mutability, &self.self_token)
-                .locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.mutability, &self.self_token).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::ReturnType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
             Self::Default => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::Type(arrow_token, ty) => {
-                (arrow_token, ty).locate_as_group(locator, file_path, code, offset)
-            }
+            Self::Type(arrow_token, ty) => (arrow_token, ty).locate_as_group(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Signature {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let loc = Surround {
             front: (
                 &self.constness,
@@ -3872,30 +2840,22 @@ impl Locate for syn::Signature {
             inner: (&self.inputs, &self.variadic),
             back: (&self.output, &self.generics.where_clause),
         }
-        .locate(locator, file_path, code, offset);
+        .locate(locator, code, offset);
 
-        locate_generics(locator, file_path, &self.generics);
+        locate_generics(locator, &self.generics);
         loc
     }
 }
 
 impl Locate for syn::StaticMutability {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Mut(v) => v.locate(locator, file_path, code, offset),
+            Self::Mut(v) => v.locate(locator, code, offset),
             Self::None => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -3904,89 +2864,55 @@ impl Locate for syn::StaticMutability {
 }
 
 impl Locate for syn::Stmt {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Local(v) => v.locate(locator, file_path, code, offset),
-            Self::Item(v) => v.locate(locator, file_path, code, offset),
+            Self::Local(v) => v.locate(locator, code, offset),
+            Self::Item(v) => v.locate(locator, code, offset),
             Self::Expr(expr, semi_token) => {
-                (expr, semi_token).locate_as_group(locator, file_path, code, offset)
+                (expr, semi_token).locate_as_group(locator, code, offset)
             }
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::StmtMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TraitBound {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         // syn always parses this paren token as empty.
-        (&self.modifier, &self.lifetimes, &self.path)
-            .locate_as_group(locator, file_path, code, offset)
+        (&self.modifier, &self.lifetimes, &self.path).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TraitBoundModifier {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
             Self::None => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
-            Self::Maybe(v) => v.locate(locator, file_path, code, offset),
+            Self::Maybe(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::TraitItem {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Const(v) => v.locate(locator, file_path, code, offset),
-            Self::Fn(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
+            Self::Const(v) => v.locate(locator, code, offset),
+            Self::Fn(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -3995,13 +2921,7 @@ impl Locate for syn::TraitItem {
 }
 
 impl Locate for syn::TraitItemConst {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((eq_token, default)) = &self.default {
             (
                 &self.attrs,
@@ -4014,7 +2934,7 @@ impl Locate for syn::TraitItemConst {
                 default,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (
                 &self.attrs,
@@ -4025,32 +2945,20 @@ impl Locate for syn::TraitItemConst {
                 &self.ty,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::TraitItemFn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (&self.attrs, &self.sig, &self.default, &self.semi_token)
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TraitItemType {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((eq_token, default)) = &self.default {
             (
                 &self.attrs,
@@ -4063,7 +2971,7 @@ impl Locate for syn::TraitItemType {
                 default,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
             (
                 &self.attrs,
@@ -4074,53 +2982,39 @@ impl Locate for syn::TraitItemType {
                 &self.bounds,
                 &self.semi_token,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::TraitItemMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.attrs, &self.mac, &self.semi_token).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::Type {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Array(v) => v.locate(locator, file_path, code, offset),
-            Self::BareFn(v) => v.locate(locator, file_path, code, offset),
-            Self::Group(v) => v.locate(locator, file_path, code, offset),
-            Self::ImplTrait(v) => v.locate(locator, file_path, code, offset),
-            Self::Infer(v) => v.locate(locator, file_path, code, offset),
-            Self::Macro(v) => v.locate(locator, file_path, code, offset),
-            Self::Never(v) => v.locate(locator, file_path, code, offset),
-            Self::Paren(v) => v.locate(locator, file_path, code, offset),
-            Self::Path(v) => v.locate(locator, file_path, code, offset),
-            Self::Ptr(v) => v.locate(locator, file_path, code, offset),
-            Self::Reference(v) => v.locate(locator, file_path, code, offset),
-            Self::Slice(v) => v.locate(locator, file_path, code, offset),
-            Self::TraitObject(v) => v.locate(locator, file_path, code, offset),
-            Self::Tuple(v) => v.locate(locator, file_path, code, offset),
+            Self::Array(v) => v.locate(locator, code, offset),
+            Self::BareFn(v) => v.locate(locator, code, offset),
+            Self::Group(v) => v.locate(locator, code, offset),
+            Self::ImplTrait(v) => v.locate(locator, code, offset),
+            Self::Infer(v) => v.locate(locator, code, offset),
+            Self::Macro(v) => v.locate(locator, code, offset),
+            Self::Never(v) => v.locate(locator, code, offset),
+            Self::Paren(v) => v.locate(locator, code, offset),
+            Self::Path(v) => v.locate(locator, code, offset),
+            Self::Ptr(v) => v.locate(locator, code, offset),
+            Self::Reference(v) => v.locate(locator, code, offset),
+            Self::Slice(v) => v.locate(locator, code, offset),
+            Self::TraitObject(v) => v.locate(locator, code, offset),
+            Self::Tuple(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -4129,128 +3023,73 @@ impl Locate for syn::Type {
 }
 
 impl Locate for syn::TypeArray {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.bracket_token,
             inner: (&self.elem, &self.semi_token, &self.len),
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeBareFn {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (&self.lifetimes, &self.unsafety, &self.abi, &self.fn_token),
             surround: &self.paren_token,
             inner: (&self.inputs, &self.variadic),
             back: &self.output,
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeGroup {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.group_token, &self.elem).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.group_token, &self.elem).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeImplTrait {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.impl_token, &self.bounds).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.impl_token, &self.bounds).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeInfer {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.underscore_token
-            .locate(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.underscore_token.locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeMacro {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.mac.locate(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.mac.locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeNever {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.bang_token.locate(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.bang_token.locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeParen {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.paren_token,
             inner: &self.elem,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypePath {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some(qself) = &self.qself {
             Qualified {
                 front: (),
@@ -4258,105 +3097,69 @@ impl Locate for syn::TypePath {
                 path: &self.path,
                 back: (),
             }
-            .locate(locator, file_path, code, offset)
+            .locate(locator, code, offset)
         } else {
-            self.path.locate(locator, file_path, code, offset)
+            self.path.locate(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::TypePtr {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.star_token,
             &self.const_token,
             &self.mutability,
             &self.elem,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeReference {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.and_token,
             &self.lifetime,
             &self.mutability,
             &self.elem,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeSlice {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.bracket_token,
             inner: &self.elem,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeTraitObject {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.dyn_token, &self.bounds).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.dyn_token, &self.bounds).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeTuple {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.paren_token,
             inner: &self.elems,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeParam {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         (
             &self.attrs,
             &self.ident,
@@ -4365,29 +3168,21 @@ impl Locate for syn::TypeParam {
             &self.eq_token,
             &self.default,
         )
-            .locate_as_group(locator, file_path, code, offset)
+            .locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::TypeParamBound {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Trait(v) => v.locate(locator, file_path, code, offset),
-            Self::Lifetime(v) => v.locate(locator, file_path, code, offset),
-            Self::PreciseCapture(v) => v.locate(locator, file_path, code, offset),
+            Self::Trait(v) => v.locate(locator, code, offset),
+            Self::Lifetime(v) => v.locate(locator, code, offset),
+            Self::PreciseCapture(v) => v.locate(locator, code, offset),
             Self::Verbatim(_) => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -4396,19 +3191,12 @@ impl Locate for syn::TypeParamBound {
 }
 
 impl Locate for syn::UnOp {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Deref(v) => v.locate(locator, file_path, code, offset),
-            Self::Not(v) => v.locate(locator, file_path, code, offset),
-            Self::Neg(v) => v.locate(locator, file_path, code, offset),
+            Self::Deref(v) => v.locate(locator, code, offset),
+            Self::Not(v) => v.locate(locator, code, offset),
+            Self::Neg(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -4417,116 +3205,66 @@ impl Locate for syn::UnOp {
 }
 
 impl Locate for syn::UseGlob {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.star_token.locate(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.star_token.locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::UseGroup {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: (),
             surround: &self.brace_token,
             inner: &self.items,
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::UseName {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        self.ident.locate(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        self.ident.locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::UsePath {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.ident, &self.colon2_token, &self.tree)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.ident, &self.colon2_token, &self.tree).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::UseRename {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.ident, &self.as_token, &self.rename)
-            .locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.ident, &self.as_token, &self.rename).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::UseTree {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Path(v) => v.locate(locator, file_path, code, offset),
-            Self::Name(v) => v.locate(locator, file_path, code, offset),
-            Self::Rename(v) => v.locate(locator, file_path, code, offset),
-            Self::Glob(v) => v.locate(locator, file_path, code, offset),
-            Self::Group(v) => v.locate(locator, file_path, code, offset),
+            Self::Path(v) => v.locate(locator, code, offset),
+            Self::Name(v) => v.locate(locator, code, offset),
+            Self::Rename(v) => v.locate(locator, code, offset),
+            Self::Glob(v) => v.locate(locator, code, offset),
+            Self::Group(v) => v.locate(locator, code, offset),
         }
     }
 }
 
 impl Locate for syn::Variadic {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((pat, colon_token)) = &self.pat {
             (&self.attrs, pat, colon_token, &self.dots, &self.comma)
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
-            (&self.attrs, &self.dots, &self.comma).locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.dots, &self.comma).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::Variant {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some((eq_token, discriminant)) = &self.discriminant {
             (
                 &self.attrs,
@@ -4535,27 +3273,19 @@ impl Locate for syn::Variant {
                 eq_token,
                 discriminant,
             )
-                .locate_as_group(locator, file_path, code, offset)
+                .locate_as_group(locator, code, offset)
         } else {
-            (&self.attrs, &self.ident, &self.fields)
-                .locate_as_group(locator, file_path, code, offset)
+            (&self.attrs, &self.ident, &self.fields).locate_as_group(locator, code, offset)
         }
     }
 }
 
 impl Locate for syn::Visibility {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Public(v) => v.locate(locator, file_path, code, offset),
-            Self::Restricted(v) => v.locate(locator, file_path, code, offset),
+            Self::Public(v) => v.locate(locator, code, offset),
+            Self::Restricted(v) => v.locate(locator, code, offset),
             Self::Inherited => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -4564,48 +3294,29 @@ impl Locate for syn::Visibility {
 }
 
 impl Locate for syn::VisRestricted {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         Surround {
             front: &self.pub_token,
             surround: &self.paren_token,
             inner: (&self.in_token, &self.path),
             back: (),
         }
-        .locate(locator, file_path, code, offset)
+        .locate(locator, code, offset)
     }
 }
 
 impl Locate for syn::WhereClause {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
-        (&self.where_token, &self.predicates).locate_as_group(locator, file_path, code, offset)
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
+        (&self.where_token, &self.predicates).locate_as_group(locator, code, offset)
     }
 }
 
 impl Locate for syn::WherePredicate {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         match self {
-            Self::Lifetime(v) => v.locate(locator, file_path, code, offset),
-            Self::Type(v) => v.locate(locator, file_path, code, offset),
+            Self::Lifetime(v) => v.locate(locator, code, offset),
+            Self::Type(v) => v.locate(locator, code, offset),
             _ => Location {
-                file_path,
                 start: offset,
                 end: offset,
             },
@@ -4616,7 +3327,7 @@ impl Locate for syn::WherePredicate {
 /// A [`syn::WhereClause`] inside [`syn::Generics`] can appear outside the generic parameter list.
 /// For example, in `impl<T> Trait for S<T> where T: Clone`, the where clause follows the self
 /// type `S<T>`. Because of this, the location of `syn::Generics` has to be set manually.
-fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::Generics) {
+fn locate_generics(locator: &mut Locator, generics: &syn::Generics) {
     let start = locator.get_location(&generics.lt_token).unwrap().start;
 
     let end = if generics.where_clause.is_some() {
@@ -4626,42 +3337,24 @@ fn locate_generics(locator: &mut Locator, file_path: FilePath, generics: &syn::G
 
         // An empty `where_clause` would otherwise keep an unrelated fallback location, so place it
         // at the end of the generic parameter list.
-        let loc = Location {
-            file_path,
-            start: end,
-            end,
-        };
+        let loc = Location { start: end, end };
         generics.where_clause.relocate(locator, loc);
 
         end
     };
 
     // Set the location of `generics`.
-    locator.set_location(
-        generics,
-        Location {
-            file_path,
-            start,
-            end,
-        },
-    );
+    locator.set_location(generics, Location { start, end });
 }
 
 // === Composite types ===
 
 impl<T: Locate> Locate for Option<T> {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         if let Some(inner) = self {
-            inner.locate(locator, file_path, code, offset)
+            inner.locate(locator, code, offset)
         } else {
             Location {
-                file_path,
                 start: offset,
                 end: offset,
             }
@@ -4670,37 +3363,24 @@ impl<T: Locate> Locate for Option<T> {
 }
 
 impl<T: Locate> Locate for Box<T> {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let t = &**self;
-        t.locate(locator, file_path, code, offset)
+        t.locate(locator, code, offset)
     }
 }
 
 impl<T: Locate> Locate for Vec<T> {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let mut start = usize::MAX;
         let mut end = offset;
 
         for item in self {
-            let loc = item.locate(locator, file_path, code, end);
+            let loc = item.locate(locator, code, end);
             start = start.min(loc.start);
             end = loc.end;
         }
 
         Location {
-            file_path,
             start: if start != usize::MAX { start } else { offset },
             end,
         }
@@ -4712,24 +3392,17 @@ where
     T: Locate,
     S: Locate,
 {
-    fn find_loc(
-        &self,
-        locator: &mut Locator,
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-    ) -> Location {
+    fn find_loc(&self, locator: &mut Locator, code: &str, offset: usize) -> Location {
         let mut start = usize::MAX;
         let mut end = offset;
 
         for item in self {
-            let loc = item.locate(locator, file_path, code, end);
+            let loc = item.locate(locator, code, end);
             start = start.min(loc.start);
             end = loc.end;
         }
 
         Location {
-            file_path,
             start: if start != usize::MAX { start } else { offset },
             end,
         }
@@ -4749,18 +3422,13 @@ pub mod helper {
     /// ```rust
     /// use syn_locator::helper;
     ///
-    /// let located = syn_locator::locate::<syn::ItemFn>("file.rs", "fn foo() {}").unwrap();
-    /// let loc = helper::char_location(located.location(&located.sig.ident).file_path, "fn foo() {}", 0, '(');
+    /// let code = "fn foo() {}";
+    /// let loc = helper::char_location(code, 0, '(');
     ///
     /// assert_eq!(loc.start, 6);
     /// assert_eq!(loc.end, 7);
     /// ```
-    pub fn char_location(
-        file_path: FilePath,
-        code: &str,
-        offset: usize,
-        content: char,
-    ) -> Location {
+    pub fn char_location(code: &str, offset: usize, content: char) -> Location {
         let cur_code = &code[offset..];
         let start = offset
             + cur_code
@@ -4768,7 +3436,6 @@ pub mod helper {
                 .unwrap_or_else(|| panic!("expected `{content}` from `{cur_code}`"));
 
         Location {
-            file_path,
             start,
             end: start + content.len_utf8(),
         }
@@ -4781,13 +3448,13 @@ pub mod helper {
     /// ```rust
     /// use syn_locator::helper;
     ///
-    /// let located = syn_locator::locate::<syn::ItemFn>("file.rs", "fn foo() {}").unwrap();
-    /// let loc = helper::str_location(located.location(&located.sig.ident).file_path, "fn foo() {}", 0, "foo");
+    /// let code = "fn foo() {}";
+    /// let loc = helper::str_location(code, 0, "foo");
     ///
     /// assert_eq!(loc.start, 3);
     /// assert_eq!(loc.end, 6);
     /// ```
-    pub fn str_location(file_path: FilePath, code: &str, offset: usize, content: &str) -> Location {
+    pub fn str_location(code: &str, offset: usize, content: &str) -> Location {
         let cur_code = &code[offset..];
 
         let start = offset
@@ -4796,7 +3463,6 @@ pub mod helper {
                 .unwrap_or_else(|| panic!("expected `{content}` from `{cur_code}`"));
 
         Location {
-            file_path,
             start,
             end: start + content.len(),
         }
