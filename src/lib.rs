@@ -7,7 +7,6 @@ mod loc;
 
 // === Re-exports ===
 
-pub use any_intern::Interned;
 #[cfg(feature = "find")]
 pub use find::*;
 pub use loc::*;
