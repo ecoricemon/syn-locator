@@ -141,8 +141,6 @@ Do not mutate or move a syntax tree after recording locations in a separate
 `Locator`; prefer `locate` or `Located::new` unless you specifically need the
 low-level API.
 
-Nested block comments are not fully handled by the comment-filtering regex.
-
 ## Testing
 
 Run the default test suite:

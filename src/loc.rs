@@ -1,5 +1,4 @@
 use crate::{Map, Result};
-use once_cell::sync::OnceCell;
 use std::{
     any::{self, Any, TypeId},
     borrow::Cow,
@@ -724,7 +723,7 @@ struct Content {
 
 impl Content {
     fn new(code: Box<str>) -> Self {
-        let filtered_code = Self::remove_non_tokens((*code).as_ref());
+        let filtered_code = CommentReplacer.replace((*code).as_ref());
         let filtered_code: Box<str> = filtered_code.into();
 
         Self {
@@ -732,28 +731,222 @@ impl Content {
             filtered_code,
         }
     }
+}
 
-    /// Replaces comments with white spaces from the given code for further
-    /// token matching.
-    fn remove_non_tokens(code: &str) -> Cow<'_, str> {
-        use regex::{Captures, Regex};
+#[derive(Debug, Clone, Copy, Default)]
+struct CommentReplacer;
 
-        static RE: OnceCell<Regex> = OnceCell::new();
+impl CommentReplacer {
+    /// Replaces comments with white spaces from the given code for further token matching.
+    fn replace(self, code: &str) -> Cow<'_, str> {
+        let bytes = code.as_bytes();
+        let mut filtered = None;
+        let mut i = 0;
 
-        // Regex does not support recursion, so nested block comments are not handled here.
-        let re = RE.get_or_init(|| {
-            Regex::new(
-                r#"(?x)
-                (//[^\n]*)  # Single line comment
-                |
-                (?s)
-                (/\*.*?\*/) # Block comment (Recursion is not supported)
-            "#,
-            )
-            .unwrap()
-        });
+        while i < bytes.len() {
+            if let Some(end) = self.string_literal_end(bytes, i) {
+                // ignores string-like literal
+                i = end;
+            } else if let Some(end) = self.char_literal_end(bytes, i) {
+                // ignores char-like literal
+                i = end;
+            } else if bytes[i..].starts_with(b"//") {
+                let end = self.line_comment_end(bytes, i + 2);
+                self.blank_out(&mut filtered, code, i, end);
+                i = end;
+            } else if bytes[i..].starts_with(b"/*") {
+                let end = self.block_comment_end(bytes, i + 2);
+                self.blank_out(&mut filtered, code, i, end);
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
 
-        re.replace_all(code, |caps: &Captures| " ".repeat(caps[0].len()))
+        filtered.map_or(Cow::Borrowed(code), |filtered| {
+            Cow::Owned(String::from_utf8(filtered).unwrap())
+        })
+    }
+
+    /// Replaces the given code range with white spaces.
+    fn blank_out(self, filtered: &mut Option<Vec<u8>>, code: &str, start: usize, end: usize) {
+        let filtered = filtered.get_or_insert_with(|| code.as_bytes().to_vec());
+
+        for byte in &mut filtered[start..end] {
+            *byte = b' ';
+        }
+    }
+
+    /// Finds the end of a line comment.
+    fn line_comment_end(self, bytes: &[u8], mut i: usize) -> usize {
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+        i
+    }
+
+    /// Finds the end of a block comment.
+    fn block_comment_end(self, bytes: &[u8], mut i: usize) -> usize {
+        let mut depth = 1;
+
+        while i + 1 < bytes.len() {
+            if bytes[i..].starts_with(b"/*") {
+                depth += 1;
+                i += 2;
+            } else if bytes[i..].starts_with(b"*/") {
+                depth -= 1;
+                i += 2;
+
+                if depth == 0 {
+                    return i;
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        bytes.len()
+    }
+
+    /// Identifies string-like literals and returns the end of the literals.
+    fn string_literal_end(self, bytes: &[u8], i: usize) -> Option<usize> {
+        if let Some(end) = self.raw_string_literal_end(bytes, i) {
+            Some(end)
+        } else if bytes[i] == b'"' {
+            Some(self.quoted_literal_end(bytes, i + 1, b'"'))
+        } else if bytes[i..].starts_with(b"b\"") || bytes[i..].starts_with(b"c\"") {
+            Some(self.quoted_literal_end(bytes, i + 2, b'"'))
+        } else {
+            None
+        }
+    }
+
+    /// Identifies raw string literals like r"..", br"..", or cr".." and returns the end of the
+    /// literals.
+    fn raw_string_literal_end(self, bytes: &[u8], i: usize) -> Option<usize> {
+        let prefix_len = if bytes[i] == b'r' {
+            1
+        } else if bytes[i..].starts_with(b"br") || bytes[i..].starts_with(b"cr") {
+            2
+        } else {
+            return None;
+        };
+
+        let mut hashes = 0;
+        let mut cursor = i + prefix_len;
+        while cursor < bytes.len() && bytes[cursor] == b'#' {
+            hashes += 1;
+            cursor += 1;
+        }
+
+        if cursor >= bytes.len() || bytes[cursor] != b'"' {
+            return None;
+        }
+
+        cursor += 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'"' {
+                let close_start = cursor + 1;
+                let close_end = close_start + hashes;
+
+                if close_end <= bytes.len()
+                    && bytes[close_start..close_end].iter().all(|&b| b == b'#')
+                {
+                    return Some(close_end);
+                }
+            }
+
+            cursor += 1;
+        }
+
+        Some(bytes.len())
+    }
+
+    /// Identifies char-like literals and returns the end byte of the literals.
+    fn char_literal_end(self, bytes: &[u8], i: usize) -> Option<usize> {
+        if bytes[i] == b'\'' {
+            self.char_literal_end_after_open_quote(bytes, i + 1)
+        } else if bytes[i..].starts_with(b"b'") {
+            self.char_literal_end_after_open_quote(bytes, i + 2)
+        } else {
+            None
+        }
+    }
+
+    /// Finds the end of char-like literals after an open quote.
+    fn char_literal_end_after_open_quote(self, bytes: &[u8], i: usize) -> Option<usize> {
+        if i >= bytes.len() || bytes[i] == b'\'' || bytes[i] == b'\n' {
+            return None;
+        }
+
+        let end = if bytes[i] == b'\\' {
+            self.escaped_char_end(bytes, i + 1)?
+        } else {
+            i + self.utf8_char_width(bytes[i])?
+        };
+
+        if end < bytes.len() && bytes[end] == b'\'' {
+            Some(end + 1)
+        } else {
+            None
+        }
+    }
+
+    /// Finds the end of char-like literals after a backslash.
+    fn escaped_char_end(self, bytes: &[u8], i: usize) -> Option<usize> {
+        if i >= bytes.len() || bytes[i] == b'\n' {
+            return None;
+        }
+
+        // Detects Unicode escape from '\u{...}'
+        if bytes[i] == b'u' && bytes.get(i + 1) == Some(&b'{') {
+            let mut cursor = i + 2;
+
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                if bytes[cursor] == b'}' {
+                    return Some(cursor + 1);
+                }
+
+                cursor += 1;
+            }
+
+            None
+        }
+        // Detects 1 byte ASICC escape from '/xNN'
+        else if bytes[i] == b'x' {
+            Some((i + 3).min(bytes.len()))
+        } else {
+            Some(i + 1)
+        }
+    }
+
+    fn utf8_char_width(self, byte: u8) -> Option<usize> {
+        if byte < 0x80 {
+            Some(1)
+        } else if byte & 0b1110_0000 == 0b1100_0000 {
+            Some(2)
+        } else if byte & 0b1111_0000 == 0b1110_0000 {
+            Some(3)
+        } else if byte & 0b1111_1000 == 0b1111_0000 {
+            Some(4)
+        } else {
+            None
+        }
+    }
+
+    /// Finds the end of ordinary quoted literals.
+    fn quoted_literal_end(self, bytes: &[u8], mut i: usize, quote: u8) -> usize {
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+            } else if bytes[i] == quote {
+                return i + 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        bytes.len()
     }
 }
 
