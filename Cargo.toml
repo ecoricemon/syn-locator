@@ -3,10 +3,10 @@ name = "syn-locator"
 version = "0.1.7"
 edition = "2021"
 rust-version = "1.65"
-description = "A source code locator for syn crate"
+description = "A source mapper for syn syntax trees"
 repository = "https://github.com/ecoricemon/syn-locator"
 license = "Apache-2.0 OR MIT"
-keywords = ["syn"]
+keywords = ["syn", "ast", "source-location", "code-analysis", "diagnostics"]
 
 [features]
 find = []
