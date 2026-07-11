@@ -17,4 +17,9 @@ fxhash = "0.2.1"
 syn = { version = "2.0.106", features = ["full"] }
 
 [dev-dependencies]
+criterion = "0.5.1"
 pretty_assertions = { version = "1.4.1" }
+
+[[bench]]
+name = "core"
+harness = false
