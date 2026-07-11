@@ -653,7 +653,7 @@ where
 pub struct Locator {
     file_path: String,
     content: Content,
-    map: Map<LocationKey, Location>,
+    map: Map<LocationKey, CompactLocation>,
 }
 
 impl Locator {
@@ -674,10 +674,28 @@ impl Locator {
     /// ```
     pub fn new(file_path: &str, code: impl Into<Box<str>>) -> Self {
         let code = code.into();
+        assert!(
+            code.len() <= u32::MAX as usize,
+            "source files larger than 4 GiB are not supported"
+        );
+
+        // We preallocate the map's capacity for the performance. The map's capacity is expected to
+        // be `code.len() * 0.9`
+        const LOCATIONS_PER_SOURCE_BYTE_NUMERATOR: usize = 9;
+        const LOCATIONS_PER_SOURCE_BYTE_DENOMINATOR: usize = 10;
+        let map_capacity = code
+            .len()
+            .saturating_mul(LOCATIONS_PER_SOURCE_BYTE_NUMERATOR)
+            / LOCATIONS_PER_SOURCE_BYTE_DENOMINATOR;
+        // Limits the map's capacity for comments in the `code`
+        const MAX_PREALLOCATED_LOCATIONS: usize = 1 << 18;
+        let map_capacity = map_capacity.min(MAX_PREALLOCATED_LOCATIONS);
+        let map = Map::with_capacity_and_hasher(map_capacity, fxhash::FxBuildHasher::default());
+
         Self {
             file_path: file_path.to_owned(),
             content: Content::new(code),
-            map: Map::default(),
+            map,
         }
     }
 
@@ -694,16 +712,33 @@ impl Locator {
         &self.file_path
     }
 
+    /// Looks up every recorded syntax-node location and returns a count and checksum.
+    ///
+    /// This is an implementation detail used by performance benchmarks.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn benchmark_all_location_lookups(&self) -> (usize, usize) {
+        self.map
+            .keys()
+            .map(|key| Location::from(*self.map.get(key).unwrap()))
+            .fold((0, 0), |(count, checksum), loc| {
+                (count + 1, checksum.wrapping_add(loc.start ^ loc.end))
+            })
+    }
+
     fn location(&self, start: usize, end: usize) -> Location {
         Location { start, end }
     }
 
     fn set_location<T: Any + ?Sized>(&mut self, syn_node: &T, loc: Location) {
-        self.map.insert(LocationKey::new(syn_node), loc);
+        self.map.insert(LocationKey::new(syn_node), loc.into());
     }
 
     fn get_location<T: Any + ?Sized>(&self, syn_node: &T) -> Option<Location> {
-        self.map.get(&LocationKey::new(syn_node)).cloned()
+        self.map
+            .get(&LocationKey::new(syn_node))
+            .copied()
+            .map(Into::into)
     }
 
     fn get_original_code(&self) -> &str {
@@ -964,6 +999,30 @@ impl LocationKey {
         Self {
             ptr: t as *const T as *const () as usize,
             ty: TypeId::of::<T>(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CompactLocation {
+    start: u32,
+    end: u32,
+}
+
+impl From<Location> for CompactLocation {
+    fn from(loc: Location) -> Self {
+        Self {
+            start: loc.start as u32,
+            end: loc.end as u32,
+        }
+    }
+}
+
+impl From<CompactLocation> for Location {
+    fn from(loc: CompactLocation) -> Self {
+        Self {
+            start: loc.start as usize,
+            end: loc.end as usize,
         }
     }
 }
