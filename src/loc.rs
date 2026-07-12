@@ -779,22 +779,49 @@ impl CommentReplacer {
         let mut i = 0;
 
         while i < bytes.len() {
-            if let Some(end) = self.string_literal_end(bytes, i) {
-                // ignores string-like literal
-                i = end;
-            } else if let Some(end) = self.char_literal_end(bytes, i) {
-                // ignores char-like literal
-                i = end;
-            } else if bytes[i..].starts_with(b"//") {
-                let end = self.line_comment_end(bytes, i + 2);
-                self.blank_out(&mut filtered, code, i, end);
-                i = end;
-            } else if bytes[i..].starts_with(b"/*") {
-                let end = self.block_comment_end(bytes, i + 2);
-                self.blank_out(&mut filtered, code, i, end);
-                i = end;
-            } else {
-                i += 1;
+            // Most source bytes cannot start a literal or comment. Dispatch on the few possible
+            // prefix bytes first so the common path only performs this match and increments `i`.
+            match bytes[i] {
+                // String-like literal or byte-character prefix.
+                // Examples: `"text"`, `r#"text"#`, `b"text"`, `c"text"`, `b'x'`
+                b'"' | b'r' | b'b' | b'c' => {
+                    if let Some(end) = self.string_literal_end(bytes, i) {
+                        // ignores string-like literal
+                        i = end;
+                    } else if let Some(end) = self.char_literal_end(bytes, i) {
+                        // `b'..'` is the only char-like literal that reaches this branch.
+                        i = end;
+                    } else {
+                        i += 1;
+                    }
+                }
+                // Character-literal or lifetime prefix.
+                // Examples: `'x'`, `'\''`, `'a`
+                b'\'' => {
+                    if let Some(end) = self.char_literal_end(bytes, i) {
+                        // ignores char-like literal
+                        i = end;
+                    } else {
+                        i += 1;
+                    }
+                }
+                // Line-comment prefix.
+                // Example: `// comment`
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    let end = self.line_comment_end(bytes, i + 2);
+                    self.blank_out(&mut filtered, code, i, end);
+                    i = end;
+                }
+                // Block-comment prefix, including nested comments.
+                // Examples: `/* comment */`, `/* outer /* inner */ */`
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    let end = self.block_comment_end(bytes, i + 2);
+                    self.blank_out(&mut filtered, code, i, end);
+                    i = end;
+                }
+                // Ordinary source byte that needs no special handling.
+                // Examples: `f`, `+`, `/`
+                _ => i += 1,
             }
         }
 

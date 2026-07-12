@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use std::fmt::Write;
-use syn_locator::{LocateEntry, Located, Locator};
+use syn_locator::Located;
 
 const NUMERIC_TYPES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32",
@@ -196,30 +196,18 @@ fn core(c: &mut Criterion) {
     let mut group = c.benchmark_group("core");
     group.throughput(Throughput::Bytes(source.len() as u64));
 
+    // Measures construction performance, including parsing and location collection.
     group.bench_function("parse_and_locate", |b| {
-        b.iter(|| {
-            black_box(
-                syn_locator::locate::<syn::File>("core.rs", black_box(source.as_str())).unwrap(),
-            )
-        });
+        b.iter(|| syn_locator::locate::<syn::File>("core.rs", black_box(source.as_str())).unwrap());
     });
 
+    // Measures construction performance from an already parsed syntax tree.
     group.bench_function("locate_only", |b| {
         b.iter_batched(
             || syntax.clone(),
-            |syntax| {
-                black_box(Located::new(syntax, "core.rs", black_box(source.as_str())).unwrap())
-            },
+            |syntax| Located::new(syntax, "core.rs", black_box(source.as_str())).unwrap(),
             BatchSize::SmallInput,
         );
-    });
-
-    group.bench_function("locate_entry_only", |b| {
-        b.iter(|| {
-            let mut locator = Locator::new("core.rs", black_box(source.as_str()));
-            black_box(syntax.locate_as_entry(&mut locator).unwrap());
-            black_box(locator)
-        });
     });
 
     group.finish();
@@ -230,8 +218,9 @@ fn core(c: &mut Criterion) {
 
     let mut lookup_group = c.benchmark_group("core_lookup");
     lookup_group.throughput(Throughput::Elements(location_count as u64));
+    // Measures lookup performance across all recorded node locations.
     lookup_group.bench_function("all_locations", |b| {
-        b.iter(|| black_box(located.locator()).benchmark_all_location_lookups());
+        b.iter(|| located.locator().benchmark_all_location_lookups());
     });
     lookup_group.finish();
 }
